@@ -30,7 +30,9 @@ class ModelBundle:
     @classmethod
     def load(cls, model_id: str, device: str, task_prompt: str) -> ModelBundle:
         processor = DonutProcessor.from_pretrained(model_id)
-        model = VisionEncoderDecoderModel.from_pretrained(model_id)
+        model = VisionEncoderDecoderModel.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16
+        )
         model.to(device)
         model.eval()
         return cls(
@@ -50,8 +52,10 @@ class ModelBundle:
         orig_h_mean = sum(heights) / len(heights)
         orig_mp_mean = sum(w * h for w, h in zip(widths, heights)) / len(images) / 1e6
 
-        pixel_values = self.processor(images, return_tensors="pt").pixel_values.to(
-            self.device
+        pixel_values = (
+            self.processor(images, return_tensors="pt")
+            .pixel_values.to(self.device)
+            .to(self.model.dtype)
         )
         proc_h, proc_w = pixel_values.shape[2], pixel_values.shape[3]
         proc_mp = proc_w * proc_h / 1e6

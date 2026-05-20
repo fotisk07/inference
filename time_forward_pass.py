@@ -19,6 +19,43 @@ MODEL_ID = "naver-clova-ix/donut-base-finetuned-cord-v2"
 TASK_PROMPT = "<s_cord-v2>"
 
 
+def patch_attn_mask(model):
+    """Fix two bugs in DonutSwinLayer.get_attn_mask:
+    1. It creates the mask in float16 on CPU — CPUs have no native fp16 ALU,
+       so this falls back to a software path that is ~500x slower than float32.
+    2. It recomputes the identical mask on every forward pass.
+    This patch computes once in float32 and caches the result per block.
+    """
+    import types
+
+    def _fast_get_attn_mask(self, height, width, dtype):
+        if self.shift_size == 0:
+            return None
+        key = (height, width)
+        if not hasattr(self, "_mask_cache"):
+            self._mask_cache = {}
+        if key not in self._mask_cache:
+            ws = self.window_size
+            ss = self.shift_size
+            # float32 on CPU — fast
+            img_mask = torch.zeros((1, height, width, 1))
+            cnt = 0
+            for h in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
+                for w in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            mw = img_mask.view(1, height // ws, ws, width // ws, ws, 1)
+            mw = mw.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, ws * ws)
+            mask = mw.unsqueeze(1) - mw.unsqueeze(2)
+            mask = mask.masked_fill(mask != 0, -100.0).masked_fill(mask == 0, 0.0)
+            self._mask_cache[key] = mask
+        return self._mask_cache[key].to(dtype=dtype)
+
+    for stage in model.encoder.encoder.layers:
+        for block in stage.blocks:
+            block.get_attn_mask = types.MethodType(_fast_get_attn_mask, block)
+
+
 def cuda_sync():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -191,7 +228,9 @@ def main():
     print(f"  decoder dtype         : {dec_dtype}")
     if enc_dtype != torch.bfloat16:
         print(f"  WARNING: expected bfloat16, got {enc_dtype}")
-    print()
+
+    patch_attn_mask(model)
+    print("  attn_mask patch applied (float32 + cached)\n")
 
     # Keep original swin for per-stage timing regardless of compile
     orig_swin = model.encoder

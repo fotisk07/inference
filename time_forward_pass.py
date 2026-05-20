@@ -20,25 +20,23 @@ TASK_PROMPT = "<s_cord-v2>"
 
 
 def patch_attn_mask(model):
-    """Fix two bugs in DonutSwinLayer.get_attn_mask:
-    1. It creates the mask in float16 on CPU — CPUs have no native fp16 ALU,
-       so this falls back to a software path that is ~500x slower than float32.
-    2. It recomputes the identical mask on every forward pass.
-    This patch computes once in float32 and caches the result per block.
+    """Fix DonutSwinLayer.get_attn_mask:
+    - Computes in float32 on CPU (no native fp16 ALU on most CPUs → 500x slower)
+    - Caches the result on GPU per (height, width, dtype) so subsequent calls
+      are a free dict lookup — no recomputation, no CPU→GPU copy, no dtype cast.
     """
     import types
+    device = next(model.encoder.parameters()).device
 
     def _fast_get_attn_mask(self, height, width, dtype):
         if self.shift_size == 0:
             return None
-        key = (height, width)
+        key = (height, width, dtype)  # dtype in key so we cache the final form
         if not hasattr(self, "_mask_cache"):
             self._mask_cache = {}
         if key not in self._mask_cache:
-            ws = self.window_size
-            ss = self.shift_size
-            # float32 on CPU — fast
-            img_mask = torch.zeros((1, height, width, 1))
+            ws, ss = self.window_size, self.shift_size
+            img_mask = torch.zeros((1, height, width, 1))  # float32 on CPU — fast
             cnt = 0
             for h in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
                 for w in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
@@ -48,8 +46,9 @@ def patch_attn_mask(model):
             mw = mw.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, ws * ws)
             mask = mw.unsqueeze(1) - mw.unsqueeze(2)
             mask = mask.masked_fill(mask != 0, -100.0).masked_fill(mask == 0, 0.0)
-            self._mask_cache[key] = mask
-        return self._mask_cache[key].to(dtype=dtype)
+            # dtype conversion + GPU transfer done once; GPU is fast at both
+            self._mask_cache[key] = mask.to(device=device, dtype=dtype)
+        return self._mask_cache[key]  # already on GPU, .to(device) in forward() is a no-op
 
     for stage in model.encoder.encoder.layers:
         for block in stage.blocks:

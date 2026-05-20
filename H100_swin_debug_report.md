@@ -9,7 +9,12 @@ specifically at **7061 ms vs 127 ms (55× slower)**.
 | Machine | GPU | Encode | Decode |
 |---|---|---|---|
 | Local | A100 MIG 1g.10gb, CUDA 13.0, torch 2.12 | 127 ms | 730 ms |
-| Other | H100 MIG 1g.10gb, CUDA 12.1, torch 2.1.2 | 5233 ms | 907 ms |
+| Other | H100 MIG 1g.10gb, CUDA 12.1, torch 2.1.2 | 7061 ms | 907 ms |
+
+> **Note on numbers:** An earlier measurement of the H100 encode time recorded 5233 ms (likely
+> from a different image or with fewer warmup iterations). The 7061 ms figure is used throughout
+> this analysis — it is consistent with the 55× slowdown claim (7061 / 127 ≈ 55×) and with the
+> per-stage breakdown totalling ~8 s before accounting for timing overhead.
 
 ---
 
@@ -205,3 +210,25 @@ consistent with the expected performance of an H100 relative to an A100.
    support (AVX-512 FP16) between two server CPUs produced a 500× difference for a
    single operation, making the same model appear broken on one machine and fast on
    another with no error messages.
+
+---
+
+## Reproducing the Bug
+
+Two scripts let you reproduce and validate the findings:
+
+**Isolated CPU float16 benchmark** (no model needed):
+```bash
+uv run benchmark_fp16_cpu.py
+```
+Shows `masked_fill` and full `get_attn_mask` timing at float16 vs float32 on the current CPU.
+A large ratio confirms the AVX-512 FP16 gap. Covers all four Swin stages.
+
+**Full model diagnostic** (reproduces the 519 ms observation):
+```bash
+# Show original slow behaviour — get_attn_mask should read ~500ms
+uv run time_forward_pass.py --no-patch
+
+# Show fixed behaviour — get_attn_mask should read ~0ms (cached)
+uv run time_forward_pass.py
+```

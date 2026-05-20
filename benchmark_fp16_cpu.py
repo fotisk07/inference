@@ -75,6 +75,27 @@ def make_mask(h: int, w: int, dtype: torch.dtype) -> torch.Tensor:
     return mask
 
 
+def make_mask_gpu(h: int, w: int, dtype: torch.dtype, device) -> torch.Tensor:
+    """Same logic as make_mask but creates tensors directly on GPU (float32 internally).
+
+    9 Python slice assignments each launch a CUDA kernel, but GPU compute is fast
+    enough that the total is ~0.3ms vs ~23ms for the CPU float32 path.
+    """
+    img_mask = torch.zeros((1, h, w, 1), device=device)  # float32 on GPU
+    cnt = 0
+    ws, ss = WINDOW_SIZE, SHIFT_SIZE
+    for sh in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
+        for sw in (slice(0, -ws), slice(-ws, -ss), slice(-ss, None)):
+            img_mask[:, sh, sw, :] = cnt
+            cnt += 1
+    mw = img_mask.view(1, h // ws, ws, w // ws, ws, 1)
+    mw = mw.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, ws * ws)
+    mask = mw.unsqueeze(1) - mw.unsqueeze(2)
+    mask = mask.masked_fill(mask != 0, float(-100.0))
+    mask = mask.masked_fill(mask == 0, float(0.0))
+    return mask.to(dtype=dtype)  # GPU dtype cast, no H2D transfer
+
+
 def separator(title: str = "") -> None:
     if title:
         print(f"\n{'=' * 20} {title} {'=' * 20}")
@@ -239,6 +260,76 @@ if torch.cuda.is_available():
     print(
         "    The patched code sends float32 to GPU and converts there (.to(device, dtype=...))"
     )
+
+# == Part 5: full ablation -- cache x dtype/device ==========================
+
+if torch.cuda.is_available():
+    separator("Part 5: full ablation -- cache x dtype/device (stage 0 mask)")
+
+    _dev = "cuda"
+    N_ABL = 20
+
+    # The three compute strategies, each returning a GPU float16 tensor.
+    # A: original — CPU float16, then H2D transfer (caller's .to(device))
+    # B: current patch — CPU float32, then H2D + GPU dtype cast in one call
+    # C: GPU direct — all computation on GPU, no transfer
+    def _strat_cpu_f16():
+        return make_mask(H0, W0, torch.float16).to(_dev)
+
+    def _strat_cpu_f32():
+        return make_mask(H0, W0, torch.float32).to(device=_dev, dtype=torch.float16)
+
+    def _strat_gpu():
+        return make_mask_gpu(H0, W0, torch.float16, _dev)
+
+    strategies_abl = [
+        ("cpu float16 (original)", _strat_cpu_f16),
+        ("cpu float32 (our patch)", _strat_cpu_f32),
+        ("gpu direct",             _strat_gpu),
+    ]
+
+    def _single_call_ms(fn):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        fn()
+        torch.cuda.synchronize()
+        return (time.perf_counter() - t0) * 1000
+
+    def _n_nocache_ms(fn, n):
+        """N independent calls, recomputing every time."""
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n):
+            fn()
+        torch.cuda.synchronize()
+        return (time.perf_counter() - t0) * 1000
+
+    def _n_cached_ms(fn, n):
+        """N calls where result is cached after the first."""
+        cache = None
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n):
+            if cache is None:
+                cache = fn()
+                torch.cuda.synchronize()  # ensure first GPU call finishes before caching
+            _ = cache
+        return (time.perf_counter() - t0) * 1000
+
+    print(f"  Stage-0 mask {MASK_SHAPE_S0}, N={N_ABL} repeated calls\n")
+    print(f"  {'strategy':<26} {'1 call':>9}  {str(N_ABL)+'-call no-cache':>17}  {str(N_ABL)+'-call cached':>14}")
+    print("  " + "-" * 72)
+
+    for name, fn in strategies_abl:
+        ms1 = _single_call_ms(fn)
+        ms_nc = _n_nocache_ms(fn, N_ABL)
+        ms_c = _n_cached_ms(fn, N_ABL)
+        print(f"  {name:<26} {ms1:9.2f}ms  {ms_nc:17.1f}ms  {ms_c:14.2f}ms")
+
+    print()
+    print("  '1 call'       = cold-start latency (first inference, no warmup)")
+    print("  'N no-cache'   = worst case: mask recomputed on every forward pass")
+    print("  'N cached'     = real scenario: compute once, cache, return dict lookup")
 
 # == Summary =================================================================
 

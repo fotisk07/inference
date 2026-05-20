@@ -10,7 +10,7 @@ import argparse
 import time
 
 import torch
-from datasets import load_dataset
+from PIL import Image
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 
 MODEL_ID = "naver-clova-ix/donut-base-finetuned-cord-v2"
@@ -55,8 +55,7 @@ def main():
     print(f"  {'model load':<30} {(time.perf_counter()-t0)*1000:8.1f} ms\n")
 
     print("Loading one sample image...")
-    ds = load_dataset("naver-clova-ix/cord-v2", split="test", streaming=True)
-    image = next(iter(ds))["image"]
+    image = Image.open("test_data/test_data.jpg").convert("RGB")
 
     def preprocess():
         pv = processor(image, return_tensors="pt").pixel_values.to(args.device).to(model.dtype)

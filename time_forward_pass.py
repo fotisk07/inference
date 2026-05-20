@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import time
 
+import sys
+
 import torch
+import transformers
 from PIL import Image
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 
@@ -39,10 +42,14 @@ def main():
     parser.add_argument("--warmup", type=int, default=1, help="warmup runs before timing")
     args = parser.parse_args()
 
-    print(f"Device : {args.device}")
-    print(f"Model  : {args.model}")
+    print(f"Python        : {sys.version.split()[0]}")
+    print(f"PyTorch       : {torch.__version__}")
+    print(f"Transformers  : {transformers.__version__}")
+    print(f"Device        : {args.device}")
+    print(f"Model         : {args.model}")
     if torch.cuda.is_available():
-        print(f"GPU    : {torch.cuda.get_device_name(0)}")
+        print(f"GPU           : {torch.cuda.get_device_name(0)}")
+        print(f"CUDA          : {torch.version.cuda}")
     print()
 
     print("Loading model...")
@@ -52,7 +59,9 @@ def main():
     model.to(args.device)
     model.eval()
     cuda_sync()
-    print(f"  {'model load':<30} {(time.perf_counter()-t0)*1000:8.1f} ms\n")
+    print(f"  {'model load':<30} {(time.perf_counter()-t0)*1000:8.1f} ms")
+    print(f"  encoder dtype         : {next(model.encoder.parameters()).dtype}")
+    print(f"  decoder dtype         : {next(model.decoder.parameters()).dtype}\n")
 
     print("Loading one sample image...")
     image = Image.open("test_data/test_data.jpg").convert("RGB")

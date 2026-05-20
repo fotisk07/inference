@@ -20,7 +20,7 @@ import transformers
 from PIL import Image
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 
-from patches import patch_attn_mask
+from patches import patch_attn_mask, patch_attn_mask_gpu
 
 MODEL_ID = "naver-clova-ix/donut-base-finetuned-cord-v2"
 TASK_PROMPT = "<s_cord-v2>"
@@ -126,9 +126,12 @@ def main():
 
     if args.no_patch:
         print("  patch       : DISABLED (--no-patch)")
+    elif dev == "cuda":
+        patch_attn_mask_gpu(model)
+        print("  patch       : applied (gpu direct)")
     else:
         patch_attn_mask(model)
-        print("  patch       : applied")
+        print("  patch       : applied (cpu float32)")
 
     if args.compile:
         print("  compiling encoder with torch.compile(dynamic=True)...")

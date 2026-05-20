@@ -34,10 +34,10 @@ def time_section(label: str, fn):
     return result
 
 
-def gpu_matmul_benchmark(device, dtype, M=1024, N=1024, K=1024, iters=20):
-    """Time a raw matmul with CUDA events — isolates raw GPU compute speed."""
-    a = torch.randn(M, K, device=device, dtype=dtype)
-    b = torch.randn(K, N, device=device, dtype=dtype)
+def matmul_bench(device, dtype, shape_a, shape_b, iters=50):
+    """Time a matmul with CUDA events. shape_a/shape_b are full tensor shapes."""
+    a = torch.randn(*shape_a, device=device, dtype=dtype)
+    b = torch.randn(*shape_b, device=device, dtype=dtype)
     for _ in range(5):
         torch.matmul(a, b)
     torch.cuda.synchronize()
@@ -51,9 +51,8 @@ def gpu_matmul_benchmark(device, dtype, M=1024, N=1024, K=1024, iters=20):
     return start.elapsed_time(end) / iters
 
 
-def encode_per_stage(model, pixel_values):
+def encode_per_stage(swin, pixel_values):
     """Run encoder stage-by-stage and print timing for each Swin stage."""
-    swin = model.encoder  # DonutSwinModel
     with torch.no_grad():
         cuda_sync()
         t0 = time.perf_counter()
@@ -100,11 +99,20 @@ def main():
         print(f"cudnn.benchmark : {torch.backends.cudnn.benchmark}")
     print()
 
-    # Raw GPU microbenchmark — if this is slow, it's a hardware/MIG/CC issue
+    # Matmul microbenchmarks — large (compute-bound) vs small-batched (Swin-like)
     if torch.cuda.is_available():
-        print("GPU matmul microbenchmark (1024x1024 float16, 20 iters):")
-        ms = gpu_matmul_benchmark(args.device, torch.float16)
-        print(f"  {'matmul avg':<30} {ms:8.2f} ms\n")
+        dtype = torch.float16
+        print("Matmul microbenchmarks:")
+        # Large — should be fast everywhere
+        ms_large = matmul_bench(args.device, dtype, (1024, 1024), (1024, 1024))
+        print(f"  {'large  1024x1024x1024':<32} {ms_large:7.3f} ms")
+        # Swin stage-0 attention: 1200 windows, 4 heads, 64 tokens, head_dim=32
+        ms_s0 = matmul_bench(args.device, dtype, (1200, 4, 64, 32), (1200, 4, 32, 64))
+        print(f"  {'swin-s0 (1200,4,64,32)@(32,64)':<32} {ms_s0:7.3f} ms")
+        # Swin stage-2 attention: ~75 windows, 16 heads, 64 tokens, head_dim=32
+        ms_s2 = matmul_bench(args.device, dtype, (75, 16, 64, 32), (75, 16, 32, 64))
+        print(f"  {'swin-s2  (75,16,64,32)@(32,64)':<32} {ms_s2:7.3f} ms")
+        print()
 
     print("Loading model...")
     t0 = time.perf_counter()
@@ -122,9 +130,12 @@ def main():
         print(f"  WARNING: expected bfloat16, got {enc_dtype}")
     print()
 
+    # Keep original swin for per-stage timing regardless of compile
+    orig_swin = model.encoder
+
     if args.compile:
         print("Compiling encoder with torch.compile ...")
-        model.encoder = torch.compile(model.encoder)
+        model.encoder = torch.compile(model.encoder, dynamic=True)
         print()
 
     print("Loading image...")
@@ -174,7 +185,7 @@ def main():
     print(f"\n  generated tokens   : {n_tokens}")
 
     print("\nPer-stage encoder breakdown:")
-    encode_per_stage(model, pixel_values)
+    encode_per_stage(orig_swin, pixel_values)
 
 
 if __name__ == "__main__":

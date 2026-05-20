@@ -51,6 +51,69 @@ def matmul_bench(device, dtype, shape_a, shape_b, iters=50):
     return start.elapsed_time(end) / iters
 
 
+def _window_partition(x, window_size):
+    B, H, W, C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+
+
+def _window_reverse(windows, window_size, H, W):
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+
+
+def step(label, fn, indent=4):
+    cuda_sync()
+    t0 = time.perf_counter()
+    result = fn()
+    cuda_sync()
+    print(f"  {' '*indent}{label:<38} {(time.perf_counter()-t0)*1000:8.2f} ms")
+    return result
+
+
+def diagnose_block(swin, pixel_values):
+    """Time every individual operation inside stage-0 block-1 (the shifted block)."""
+    print("\nBlock-level diagnostic (stage 0, block 1 — shifted):")
+    with torch.no_grad():
+        hidden_states, output_dims = swin.embeddings(pixel_values)
+        stage = swin.encoder.layers[0]
+        # advance through block 0 silently to get correct input for block 1
+        hidden_states = stage.blocks[0](hidden_states, output_dims)[0]
+
+        block = stage.blocks[1]
+        height, width = output_dims
+        B, _, C = hidden_states.size()
+        ws = block.window_size
+        ss = block.shift_size
+        shortcut = hidden_states
+
+        hs = step("layernorm_before", lambda: block.layernorm_before(hidden_states))
+        hs = step("view to (B,H,W,C)", lambda: hs.view(B, height, width, C))
+        hs, pad_values = block.maybe_pad(hs, height, width)
+        _, Hp, Wp, _ = hs.shape
+
+        # CPU-side mask creation (not a GPU op)
+        t0 = time.perf_counter()
+        attn_mask = block.get_attn_mask(Hp, Wp, dtype=hs.dtype)
+        print(f"      {'get_attn_mask (CPU)':<38} {(time.perf_counter()-t0)*1000:8.2f} ms")
+
+        if attn_mask is not None:
+            print(f"        mask shape: {attn_mask.shape}, size: {attn_mask.numel()*2/1024:.0f} KB")
+            attn_mask = step("attn_mask .to(device)", lambda: attn_mask.to(hs.device))
+
+        hs = step("torch.roll", lambda: torch.roll(hs, shifts=(-ss, -ss), dims=(1, 2)))
+        hs_w = step("window_partition", lambda: _window_partition(hs, ws).view(-1, ws*ws, C))
+        attn_out = step("self.attention", lambda: block.attention(hs_w, attn_mask, None))
+        aw = attn_out[0]
+        aw = step("window_reverse", lambda: _window_reverse(aw.view(-1, ws, ws, C), ws, Hp, Wp))
+        aw = step("torch.roll (unshift)", lambda: torch.roll(aw, shifts=(ss, ss), dims=(1, 2)))
+        aw = step("view + drop_path + add", lambda: shortcut + block.drop_path(aw[:, :height, :width].contiguous().view(B, height*width, C)))
+        lo = step("layernorm_after", lambda: block.layernorm_after(aw))
+        lo = step("intermediate (FFN)", lambda: block.intermediate(lo))
+        step("output + residual", lambda: aw + block.output(lo))
+
+
 def encode_per_stage(swin, pixel_values):
     """Run encoder stage-by-stage and print timing for each Swin stage."""
     with torch.no_grad():
@@ -186,6 +249,8 @@ def main():
 
     print("\nPer-stage encoder breakdown:")
     encode_per_stage(orig_swin, pixel_values)
+
+    diagnose_block(orig_swin, pixel_values)
 
 
 if __name__ == "__main__":

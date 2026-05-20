@@ -10,6 +10,11 @@ resolution, not just the largest (stage 0).
 Standalone -- no local imports. Requires: torch
 """
 
+# /// script
+# dependencies = [
+#   "torch"
+# ]
+# ///
 import sys
 import time
 
@@ -20,12 +25,14 @@ SHIFT_SIZE = 4
 ITERS = 10
 
 # Swin stage dimensions for a 1280x960 input (patch_size=4, window_size=8).
-# Each stage downsamples by 2x via patch merging.
+# Each stage downsamples by 2x via patch merging. Widths that are not a
+# multiple of window_size are padded up by maybe_pad() before mask creation,
+# so the mask dimensions use the padded values (stages 2 and 3).
 STAGES = [
-    ("stage 0", 320, 240),   # feature map after patch embed: 1280/4 x 960/4
-    ("stage 1", 160, 120),   # after first patch merge
-    ("stage 2",  80,  60),   # after second patch merge
-    ("stage 3",  40,  30),   # after third patch merge
+    ("stage 0", 320, 240),  # 1280/4 x 960/4; 240 = 30*8 -- no padding
+    ("stage 1", 160, 120),  # 120 = 15*8 -- no padding
+    ("stage 2",  80,  64),  # raw W=60, padded to 64 (next multiple of 8)
+    ("stage 3",  40,  32),  # raw W=30, padded to 32 (next multiple of 8)
 ]
 
 H0, W0 = STAGES[0][1], STAGES[0][2]
@@ -119,7 +126,9 @@ if torch.cuda.is_available():
 separator("Part 2: full get_attn_mask -- all four Swin stages")
 
 print("  This is what transformers 4.37.2 runs on every forward pass.\n")
-print(f"  {'stage':<10} {'mask shape':<22} {'float32':>10}   {'float16':>10}   {'slowdown':>8}")
+print(
+    f"  {'stage':<10} {'mask shape':<22} {'float32':>10}   {'float16':>10}   {'slowdown':>8}"
+)
 print("  " + "-" * 64)
 
 stage_ms_f16 = {}
@@ -146,7 +155,9 @@ for stage_name, H, W in STAGES:
     ms16 = (time.perf_counter() - t0) / ITERS * 1000
 
     slowdown = ms16 / ms32 if ms32 > 0 else 0
-    print(f"  {stage_name:<10} {str(sh):<22} {ms32:10.2f}ms  {ms16:10.2f}ms  {slowdown:>6.0f}x")
+    print(
+        f"  {stage_name:<10} {str(sh):<22} {ms32:10.2f}ms  {ms16:10.2f}ms  {slowdown:>6.0f}x"
+    )
 
     stage_ms_f16[stage_name] = ms16
     stage_ms_f32[stage_name] = ms32
@@ -156,9 +167,13 @@ blocks_per_stage = {"stage 0": 1, "stage 1": 1, "stage 2": 7, "stage 3": 1}
 total_f16 = sum(blocks_per_stage[n] * stage_ms_f16[n] for n in blocks_per_stage)
 total_f32 = sum(blocks_per_stage[n] * stage_ms_f32[n] for n in blocks_per_stage)
 
-print(f"\n  Total mask cost per forward pass ({sum(blocks_per_stage.values())} shifted blocks):")
+print(
+    f"\n  Total mask cost per forward pass ({sum(blocks_per_stage.values())} shifted blocks):"
+)
 print(f"    original (float16, recomputed) : {total_f16:7.1f} ms")
-print(f"    patched  (float32, first call) : {total_f32:7.1f} ms  (then cached -> ~0 ms)")
+print(
+    f"    patched  (float32, first call) : {total_f32:7.1f} ms  (then cached -> ~0 ms)"
+)
 
 # == Part 3: caching impact ==================================================
 
@@ -187,7 +202,9 @@ def simulate_patched(n_passes: int, device="cpu") -> float:
     return (time.perf_counter() - t0) * 1000
 
 
-print("  Swin stage 2 has 14 blocks, 7 with shifted windows -> 7 mask calls per forward pass.")
+print(
+    "  Swin stage 2 has 14 blocks, 7 with shifted windows -> 7 mask calls per forward pass."
+)
 print("  Multiply by batch size and number of images for total cost.\n")
 
 for n in (1, 7, 50, 200):
@@ -227,10 +244,14 @@ if torch.cuda.is_available():
 
 separator("Summary")
 print(f"  Stage-0 get_attn_mask float16 (original) : {ms_mask_f16:7.1f} ms per call")
-print(f"  Stage-0 get_attn_mask float32 (patched)  : {ms_mask_f32:7.1f} ms  (first call only, then cached)")
+print(
+    f"  Stage-0 get_attn_mask float32 (patched)  : {ms_mask_f32:7.1f} ms  (first call only, then cached)"
+)
 print("  Subsequent calls (cached GPU)            :    ~0.00 ms")
 print()
-print(f"  Total mask overhead per forward pass     : {total_f16:7.1f} ms original -> {total_f32:5.1f} ms patched (first pass)")
+print(
+    f"  Total mask overhead per forward pass     : {total_f16:7.1f} ms original -> {total_f32:5.1f} ms patched (first pass)"
+)
 print()
 print("  Root cause: CPUs without AVX-512 FP16 extensions emulate float16 in software.")
 print("  masked_fill on a (1200, 64, 64) float16 tensor touches 4.9M elements with no")

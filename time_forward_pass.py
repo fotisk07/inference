@@ -180,6 +180,9 @@ def main():
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--compile", action="store_true", help="torch.compile the encoder")
     parser.add_argument("--cudnn-benchmark", action="store_true", help="enable cudnn.benchmark autotuning")
+    parser.add_argument("--no-patch", action="store_true", help="skip attn_mask patch — reproduces the original slow behaviour")
+    parser.add_argument("--no-stage-breakdown", action="store_true", help="skip per-stage encoder timing")
+    parser.add_argument("--no-block-diagnose", action="store_true", help="skip per-operation block diagnostic")
     args = parser.parse_args()
 
     if args.cudnn_benchmark:
@@ -228,8 +231,11 @@ def main():
     if enc_dtype != torch.bfloat16:
         print(f"  WARNING: expected bfloat16, got {enc_dtype}")
 
-    patch_attn_mask(model)
-    print("  attn_mask patch applied (float32 + cached)\n")
+    if args.no_patch:
+        print("  attn_mask patch: DISABLED (--no-patch) — expect slow get_attn_mask\n")
+    else:
+        patch_attn_mask(model)
+        print("  attn_mask patch: applied (float32 + cached)\n")
 
     # Keep original swin for per-stage timing regardless of compile
     orig_swin = model.encoder
@@ -285,10 +291,12 @@ def main():
     n_tokens = int(eos_positions[0].item()) + 1 if len(eos_positions) > 0 else len(row)
     print(f"\n  generated tokens   : {n_tokens}")
 
-    print("\nPer-stage encoder breakdown:")
-    encode_per_stage(orig_swin, pixel_values)
+    if not args.no_stage_breakdown:
+        print("\nPer-stage encoder breakdown:")
+        encode_per_stage(orig_swin, pixel_values)
 
-    diagnose_block(orig_swin, pixel_values)
+    if not args.no_block_diagnose:
+        diagnose_block(orig_swin, pixel_values)
 
 
 if __name__ == "__main__":

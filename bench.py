@@ -11,6 +11,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
+import json
+import platform
 import statistics
 import sys
 import time
@@ -85,6 +88,75 @@ def fmt(values: list[float]) -> str:
     return f"{m:7.1f} ± {s:5.1f} ms"
 
 
+def _system_info() -> dict:
+    info: dict = {
+        "python_version": sys.version.split()[0],
+        "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
+        "platform": platform.platform(),
+    }
+    if torch.cuda.is_available():
+        info["gpu_name"] = torch.cuda.get_device_name(0)
+        info["cuda_version"] = torch.version.cuda
+        info["cudnn_version"] = str(torch.backends.cudnn.version())
+    return info
+
+
+def save_stats(
+    path: str,
+    args,
+    pixel_values,
+    enc_times: list[float],
+    dec_times: list[float],
+    e2e_times: list[float],
+    token_counts: list[int],
+    peak_mb: float,
+) -> None:
+    def _stat(vals: list[float]) -> dict:
+        return {
+            "mean": round(statistics.mean(vals), 3),
+            "std": round(statistics.stdev(vals) if len(vals) > 1 else 0.0, 3),
+        }
+
+    data = {
+        "schema_version": 1,
+        "script": "bench.py",
+        "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "args": {
+            "model": args.model,
+            "device": args.device,
+            "warmup": args.warmup,
+            "runs": args.runs,
+            "no_patch": args.no_patch,
+            "compile": args.compile,
+        },
+        "system": _system_info(),
+        "image": {
+            "path": TEST_IMAGE,
+            "input_shape": list(pixel_values.shape),
+        },
+        "runs": {
+            "encode_ms": enc_times,
+            "decode_ms": dec_times,
+            "e2e_ms": e2e_times,
+            "n_tokens": token_counts,
+        },
+        "summary": {
+            "encode_ms": _stat(enc_times),
+            "decode_ms": _stat(dec_times),
+            "e2e_ms": _stat(e2e_times),
+            "tokens_per_sec": round(
+                statistics.mean(token_counts) / (statistics.mean(dec_times) / 1000.0), 2
+            ),
+            "tokens_mean": round(statistics.mean(token_counts), 1),
+            "peak_gpu_mb": round(peak_mb, 1),
+        },
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"\n  stats saved → {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Donut inference benchmark")
     parser.add_argument("--model", default=MODEL_ID)
@@ -96,6 +168,9 @@ def main():
     parser.add_argument("--no-patch", action="store_true", help="skip attn_mask patch")
     parser.add_argument(
         "--compile", action="store_true", help="torch.compile the encoder"
+    )
+    parser.add_argument(
+        "--save", default=None, metavar="PATH", help="save per-run stats to JSON"
     )
     args = parser.parse_args()
 
@@ -189,6 +264,18 @@ def main():
     print(f"  {'tokens (mean)':<{w}} : {mean_tokens:7.0f}")
     if dev == "cuda":
         print(f"  {'peak GPU mem':<{w}} : {peak_mb:7.0f} MB")
+
+    if args.save:
+        save_stats(
+            args.save,
+            args,
+            pixel_values,
+            enc_times,
+            dec_times,
+            e2e_times,
+            token_counts,
+            peak_mb,
+        )
 
 
 if __name__ == "__main__":

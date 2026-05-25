@@ -22,6 +22,7 @@ for BS in 1 2 4 8; do
     --runs 10 \
     --batch-size "$BS" \
     --save "$RESULTS/exp05_memory_bs${BS}.json"
+    --no-patch
 done
 
 echo "=== Exp05 done. Results in $RESULTS/exp05_memory_bs*.json ==="

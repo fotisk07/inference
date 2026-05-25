@@ -69,7 +69,7 @@ def patch_attn_mask_gpu(model) -> None:
             "patch_attn_mask_gpu requires a CUDA device; use patch_attn_mask for CPU inference"
         )
 
-    def _fast_get_attn_mask_gpu(self, height, width, dtype, device=None):
+    def _fast_get_attn_mask_gpu(self, height, width, dtype):
         if self.shift_size == 0:
             return None
         key = (height, width, dtype)

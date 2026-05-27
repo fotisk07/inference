@@ -11,8 +11,8 @@ def load_pool(
     dataset_split: str,
     image_column: str,
     image_dir: str | None,
-) -> list[Image.Image]:
-    """Load an image pool from a local directory or HuggingFace dataset."""
+) -> list:
+    """Return a lazy pool of Path objects (local) or (dataset, column, idx) tuples (HF)."""
     if image_dir:
         extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
         paths = sorted(
@@ -20,17 +20,25 @@ def load_pool(
         )
         if not paths:
             sys.exit(f"No images found in {image_dir}")
-        images = [Image.open(p).convert("RGB") for p in paths[:pool_size]]
+        pool = paths[:pool_size]
     else:
         from datasets import load_dataset
 
         ds = load_dataset(dataset, split=dataset_split)
         n = min(pool_size, len(ds))
-        images = [ds[i][image_column].convert("RGB") for i in range(n)]
-    if not images:
+        pool = [(ds, image_column, i) for i in range(n)]
+    if not pool:
         sys.exit("Pool is empty — check --dataset / --image-dir / --pool")
-    return images
+    return pool
 
 
-def sample_batch(pool: list[Image.Image], batch_size: int) -> list[Image.Image]:
-    return [pool[random.randrange(len(pool))] for _ in range(batch_size)]
+def _load_entry(entry) -> Image.Image:
+    if isinstance(entry, Path):
+        return Image.open(entry).convert("RGB")
+    ds, col, i = entry
+    return ds[i][col].convert("RGB")
+
+
+def sample_batch(pool: list, batch_size: int) -> list[Image.Image]:
+    entries = [pool[random.randrange(len(pool))] for _ in range(batch_size)]
+    return [_load_entry(e) for e in entries]

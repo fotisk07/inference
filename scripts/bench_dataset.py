@@ -1,12 +1,6 @@
 """Donut dataset benchmark — high-level component timing.
 
 Measures preprocessing, encoder, and decoder latency over a pool of real images
-from a HuggingFace dataset (or local directory).
-
-Key metric: decode_ms_per_token (total decode time / tokens generated).
-Raw decode_ms is not representative because the decoder is autoregressive and
-its wall-clock time grows linearly with sequence length.
-
 Prints a 5-line summary; saves full per-run raw data to JSON with --save.
 
 Usage:
@@ -15,8 +9,6 @@ Usage:
     uv run scripts/bench_dataset.py --image-dir /path/to/images --pool 20 --runs 50
     uv run scripts/bench_dataset.py --batch-size 4 --max-new-tokens 100 --save out.json
 """
-
-from __future__ import annotations
 
 import datetime
 import statistics
@@ -32,7 +24,7 @@ from inference.data import load_pool, sample_batch
 from inference.model import apply_patch, load_model
 from inference.saving import atomic_save_json
 from inference.settings import BenchSettings
-from inference.stats import system_info
+from inference.stats import stat, system_info
 from inference.timing import CudaTimer
 
 
@@ -149,8 +141,7 @@ def run_once(
     )
 
 
-def build_results(cfg: Settings, pool, input_shape, lists: dict) -> dict:
-    from inference.stats import stat
+def build_results(cfg: Settings, pool, lists: dict) -> dict:
 
     pre = lists["preprocess_ms"]
     enc = lists["encode_ms"]
@@ -182,9 +173,7 @@ def build_results(cfg: Settings, pool, input_shape, lists: dict) -> dict:
         "system": system_info(),
         "pool": {
             "size": len(pool),
-            "image_sizes": [[img.width, img.height] for img in pool],
         },
-        "input_shape": input_shape,
         "runs": lists,
         "summary": {
             "preprocess_ms": stat(pre),
@@ -213,13 +202,6 @@ def main():
     pool = load_pool(
         cfg.pool, cfg.dataset, cfg.dataset_split, cfg.image_column, cfg.image_dir
     )
-
-    sample_imgs = sample_batch(pool, cfg.batch_size)
-    sample_pv = (
-        processor(sample_imgs, return_tensors="pt").pixel_values.to(dev).to(model.dtype)
-    )
-    input_shape = list(sample_pv.shape)
-    del sample_pv
 
     print(f"Warmup ({cfg.warmup} run(s))...")
     for _ in range(cfg.warmup):
@@ -261,7 +243,6 @@ def main():
                 build_results(
                     cfg,
                     pool,
-                    input_shape,
                     {
                         "preprocess_ms": pre_list,
                         "encode_ms": enc_list,

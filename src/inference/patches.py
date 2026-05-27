@@ -1,20 +1,4 @@
-"""Model patches for Donut inference.
-
-Two variants are provided:
-  patch_attn_mask(model)      -- CPU float32 computation + H2D transfer. Safe for
-                                  both CPU and GPU inference.
-  patch_attn_mask_gpu(model)  -- all computation directly on GPU. ~75x faster
-                                  cold-start; requires CUDA.
-
-Both fix the same two bugs in DonutSwinLayer.get_attn_mask (transformers 4.37.2):
-  1. Float16 arithmetic on CPU — falls back to software emulation on CPUs without
-     AVX-512 FP16, making masked_fill ~500x slower than on GPU.
-  2. Mask recomputed on every forward pass — it is a deterministic function of
-     (window_size, shift_size, height, width) and should be computed once.
-
-See H100_swin_debug_report.md for the full investigation and benchmark_fp16_cpu.py
-Part 5 for the full cache x dtype/device ablation.
-"""
+"""Model patches for Donut inference."""
 
 import types
 
@@ -29,7 +13,7 @@ def patch_attn_mask(model) -> None:
     """
     device = next(model.encoder.parameters()).device
 
-    def _fast_get_attn_mask(self, height, width, dtype):
+    def _fast_get_attn_mask(self, height, width, dtype, device=device):
         if self.shift_size == 0:
             return None
         key = (height, width, dtype)
@@ -69,7 +53,7 @@ def patch_attn_mask_gpu(model) -> None:
             "patch_attn_mask_gpu requires a CUDA device; use patch_attn_mask for CPU inference"
         )
 
-    def _fast_get_attn_mask_gpu(self, height, width, dtype):
+    def _fast_get_attn_mask_gpu(self, height, width, dtype, device=device):
         if self.shift_size == 0:
             return None
         key = (height, width, dtype)

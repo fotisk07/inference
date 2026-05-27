@@ -31,8 +31,8 @@ ITERS = 10
 STAGES = [
     ("stage 0", 320, 240),  # 1280/4 x 960/4; 240 = 30*8 -- no padding
     ("stage 1", 160, 120),  # 120 = 15*8 -- no padding
-    ("stage 2",  80,  64),  # raw W=60, padded to 64 (next multiple of 8)
-    ("stage 3",  40,  32),  # raw W=30, padded to 32 (next multiple of 8)
+    ("stage 2", 80, 64),  # raw W=60, padded to 64 (next multiple of 8)
+    ("stage 3", 40, 32),  # raw W=30, padded to 32 (next multiple of 8)
 ]
 
 H0, W0 = STAGES[0][1], STAGES[0][2]
@@ -285,7 +285,7 @@ if torch.cuda.is_available():
     strategies_abl = [
         ("cpu float16 (original)", _strat_cpu_f16),
         ("cpu float32 (our patch)", _strat_cpu_f32),
-        ("gpu direct",             _strat_gpu),
+        ("gpu direct", _strat_gpu),
     ]
 
     def _single_call_ms(fn):
@@ -317,7 +317,9 @@ if torch.cuda.is_available():
         return (time.perf_counter() - t0) * 1000
 
     print(f"  Stage-0 mask {MASK_SHAPE_S0}, N={N_ABL} repeated calls\n")
-    print(f"  {'strategy':<26} {'1 call':>9}  {str(N_ABL)+'-call no-cache':>17}  {str(N_ABL)+'-call cached':>14}")
+    print(
+        f"  {'strategy':<26} {'1 call':>9}  {str(N_ABL) + '-call no-cache':>17}  {str(N_ABL) + '-call cached':>14}"
+    )
     print("  " + "-" * 72)
 
     for name, fn in strategies_abl:

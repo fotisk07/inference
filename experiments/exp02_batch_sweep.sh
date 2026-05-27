@@ -17,10 +17,10 @@ mkdir -p "$RESULTS"
 
 for BS in 1 2 4 8; do
   echo "=== Exp02: Batch size $BS ==="
-  uv run --project "$ROOT" bench_dataset.py \
+  uv run --project "$ROOT" scripts/bench_dataset.py \
     --pool 50 \
     --runs 30 \
-    --batch-size "$BS" \
+    --batch_size "$BS" \
     --save "$RESULTS/exp02_batch_bs${BS}.json"
 done
 

@@ -15,9 +15,9 @@ RESULTS="$ROOT/results"
 mkdir -p "$RESULTS"
 
 echo "=== Exp03: Layer Breakdown (20 images) ==="
-uv run --project "$ROOT" bench_layers.py \
+uv run --project "$ROOT" scripts/bench_layers.py \
   --pool 20 \
-  --n-images 20 \
+  --n_images 20 \
   --save "$RESULTS/exp03_layer_breakdown.json"
 
 echo "=== Exp03 done. Results in $RESULTS/exp03_layer_breakdown.json ==="

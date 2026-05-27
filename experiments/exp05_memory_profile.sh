@@ -17,12 +17,12 @@ mkdir -p "$RESULTS"
 
 for BS in 1 2 4 8; do
   echo "=== Exp05: Memory profile at batch_size=$BS ==="
-  uv run --project "$ROOT" bench_dataset.py \
+  uv run --project "$ROOT" scripts/bench_dataset.py \
     --pool 20 \
     --runs 10 \
-    --batch-size "$BS" \
+    --batch_size "$BS" \
     --save "$RESULTS/exp05_memory_bs${BS}.json"
-    --no-patch
+    --no_patch
 done
 
 echo "=== Exp05 done. Results in $RESULTS/exp05_memory_bs*.json ==="

@@ -15,8 +15,8 @@ RESULTS="$ROOT/results"
 mkdir -p "$RESULTS"
 
 echo "=== Exp01: Component Latency Breakdown (batch=1) ==="
-uv run --project "$ROOT" bench_dataset.py \
+uv run --project "$ROOT" scripts/bench_dataset.py \
   --pool 50 \
   --runs 50 \
-  --batch-size 1 \
+  --batch_size 1 \
   --save "$RESULTS/exp01_component_latency.json"

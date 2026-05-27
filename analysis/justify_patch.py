@@ -43,13 +43,13 @@ ITERS = 10
 STAGES = [
     ("stage 0", 320, 240),
     ("stage 1", 160, 120),
-    ("stage 2",  80,  64),
-    ("stage 3",  40,  32),
+    ("stage 2", 80, 64),
+    ("stage 3", 40, 32),
 ]
 H0, W0 = STAGES[0][1], STAGES[0][2]
 
 NW0 = (H0 // WINDOW_SIZE) * (W0 // WINDOW_SIZE)  # number of windows at stage 0
-WW = WINDOW_SIZE * WINDOW_SIZE                    # window area = 64
+WW = WINDOW_SIZE * WINDOW_SIZE  # window area = 64
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -87,8 +87,8 @@ def original_get_attn_mask(height, width, dtype):
     mask_windows = _window_partition_flat(img_mask, ws)
     attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
     attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0))  # ← Bug 1: FP16 op
-    attn_mask = attn_mask.masked_fill(attn_mask == 0, float(0.0))     # ← Bug 1: FP16 op
-    return attn_mask                                                    # ← Bug 2: not cached
+    attn_mask = attn_mask.masked_fill(attn_mask == 0, float(0.0))  # ← Bug 1: FP16 op
+    return attn_mask  # ← Bug 2: not cached
 
 
 # ── Patched version (mirrors patches.py) ─────────────────────────────────────
@@ -151,7 +151,7 @@ t_f32 = torch.zeros(mask_shape)
 t_f16 = torch.zeros(mask_shape, dtype=torch.float16)
 
 print(f"  Pre-allocated tensor shape {list(mask_shape)}")
-print(f"  (same as the final attn_mask for stage 0 — largest mask)\n")
+print("  (same as the final attn_mask for stage 0 — largest mask)\n")
 
 ms_f32 = _bench_fn(lambda: t_f32.masked_fill(t_f32 != 0, -100.0))
 ms_f16 = _bench_fn(lambda: t_f16.masked_fill(t_f16 != 0, -100.0))
@@ -170,8 +170,12 @@ if BUG_OBSERVABLE:
     print("  narrowed back. For 4.9M elements × 2 masked_fill calls → ~500 ms.")
 else:
     print(f"  NOTE: ratio is {ratio:.1f}x (<= 10x). This CPU has native AVX-512 FP16")
-    print("  (Intel Sapphire Rapids / AMD Zen 4+) — float16 ops are hardware-accelerated.")
-    print("  On this machine float16 is even *faster* (smaller tensors = less bandwidth).")
+    print(
+        "  (Intel Sapphire Rapids / AMD Zen 4+) — float16 ops are hardware-accelerated."
+    )
+    print(
+        "  On this machine float16 is even *faster* (smaller tensors = less bandwidth)."
+    )
     print("  The bug only manifests on older server CPUs without this extension.")
     print("  The patch remains correct and portable regardless.")
 
@@ -202,7 +206,9 @@ for name, H, W in STAGES:
 
 print()
 if not BUG_OBSERVABLE:
-    print("  On this machine the patch does not provide a raw speedup (native FP16 CPU).")
+    print(
+        "  On this machine the patch does not provide a raw speedup (native FP16 CPU)."
+    )
     print("  The value of the patch is portability + correctness + caching (Part 5).")
 else:
     print("  The patch eliminates the float16 software-emulation overhead.")
@@ -210,7 +216,9 @@ else:
 
 # ── Part 3: Correctness ───────────────────────────────────────────────────────
 
-_sep("Part 3: Correctness — patched output == original output (all stages, both dtypes)")
+_sep(
+    "Part 3: Correctness — patched output == original output (all stages, both dtypes)"
+)
 print("  Integers 0–8 and the final values -100.0/0.0 are all exactly representable")
 print("  in both float16 and float32, so we expect bit-for-bit identical results.\n")
 print(f"  {'stage':<10} {'dtype':<14} {'result':<14} {'max_diff':>10}")
@@ -265,7 +273,9 @@ checks = [
 ]
 
 frac_masked = (mask == -100.0).float().mean().item()
-checks.append((frac_masked > 0, f"{frac_masked:.1%} of attention pairs masked (-100.0)", ""))
+checks.append(
+    (frac_masked > 0, f"{frac_masked:.1%} of attention pairs masked (-100.0)", "")
+)
 checks.append(
     (
         torch.all((mask == 0.0) | (mask == -100.0)).item(),
@@ -276,16 +286,24 @@ checks.append(
 
 for ok, label, detail in checks:
     status = "PASS" if ok else "FAIL"
-    suffix = f"  [got: {detail}]" if detail and not ok else (f"  ({detail})" if detail else "")
+    suffix = (
+        f"  [got: {detail}]"
+        if detail and not ok
+        else (f"  ({detail})" if detail else "")
+    )
     print(f"  {status}  {label}{suffix}")
 
 
 # ── Part 5: Caching benefit ───────────────────────────────────────────────────
 
 _sep("Part 5: Caching — cost over N forward passes (stage-0 mask)")
-print("  Stage 2 has 14 blocks, 7 with shifted windows → 7 mask calls per forward pass.")
+print(
+    "  Stage 2 has 14 blocks, 7 with shifted windows → 7 mask calls per forward pass."
+)
 print("  With caching (Fix 2 of the patch), only the first call does real work.\n")
-print(f"  {'N':>5}  {'original (no cache)':>22}  {'patched (cached)':>18}  {'speedup':>8}")
+print(
+    f"  {'N':>5}  {'original (no cache)':>22}  {'patched (cached)':>18}  {'speedup':>8}"
+)
 print("  " + "-" * 60)
 
 for n in (1, 7, 50, 200):
@@ -313,16 +331,22 @@ _sep("Summary")
 
 blocks_per_stage = {"stage 0": 1, "stage 1": 1, "stage 2": 7, "stage 3": 1}
 total_orig = sum(blocks_per_stage[n] * stage_ms_orig[n] for n in blocks_per_stage)
-total_patch_first = sum(blocks_per_stage[n] * stage_ms_patch[n] for n in blocks_per_stage)
+total_patch_first = sum(
+    blocks_per_stage[n] * stage_ms_patch[n] for n in blocks_per_stage
+)
 
 if BUG_OBSERVABLE:
     print("  Bug 1 (float16 CPU):   PRESENT on this machine — see Part 1 ratio")
-    print(f"  Per-forward-pass cost: {total_orig:.1f} ms original → "
-          f"{total_patch_first:.1f} ms patched (first pass only, then cached → ~0 ms)")
+    print(
+        f"  Per-forward-pass cost: {total_orig:.1f} ms original → "
+        f"{total_patch_first:.1f} ms patched (first pass only, then cached → ~0 ms)"
+    )
 else:
     print("  Bug 1 (float16 CPU):   NOT OBSERVABLE here (native AVX-512 FP16 CPU)")
     print("  The patch is still the correct fix: it avoids relying on AVX-512 FP16")
-    print("  being present, making the code portable across all server CPU generations.")
+    print(
+        "  being present, making the code portable across all server CPU generations."
+    )
 
 print()
 print("  Bug 2 (no caching):    FIXED — see Part 5; N=200 calls → ~65× speedup")

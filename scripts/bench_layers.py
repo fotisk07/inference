@@ -18,24 +18,21 @@ Usage:
     uv run scripts/bench_layers.py --no-patch --save layers.json
 """
 
-from __future__ import annotations
-
 import datetime
-import random
-import statistics
 import sys
 
 import torch
 from PIL import Image
 from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
+from tqdm import tqdm
 
 from inference.constants import DEFAULT_DATASET, TASK_PROMPT
-from inference.data import load_pool
+from inference.data import load_pool, sample_batch
 from inference.model import apply_patch, load_model
 from inference.saving import atomic_save_json
 from inference.settings import BenchSettings
-from inference.stats import system_info
+from inference.stats import stat, system_info
 from inference.timing import LayerTimer
 
 
@@ -165,48 +162,36 @@ def profile_one_image(
 
 
 def aggregate(per_image: list[dict]) -> dict:
-    """Compute mean ± std per layer across all images."""
+    """Compute stats per layer across all images."""
     enc_keys = [k for k in per_image[0]["encoder"] if k != "total"]
     dec_keys = list(per_image[0]["decoder"]["layers"].keys())
 
-    def _ms(vals: list[float]) -> dict:
-        m = statistics.mean(vals)
-        s = statistics.stdev(vals) if len(vals) > 1 else 0.0
-        return {"mean": round(m, 3), "std": round(s, 3)}
-
     enc_summary: dict = {}
     enc_totals = [img["encoder"]["total"] for img in per_image]
-    total_mean = statistics.mean(enc_totals)
+    total_mean = stat(enc_totals)["mean"]
     for key in enc_keys:
         vals = [img["encoder"][key] for img in per_image]
-        d = _ms(vals)
+        d = stat(vals)
         d["pct"] = round(100.0 * d["mean"] / total_mean, 1) if total_mean > 0 else 0.0
         enc_summary[key] = d
-    enc_summary["total"] = _ms(enc_totals)
+    enc_summary["total"] = stat(enc_totals)
 
     dec_summary: dict = {}
     dec_totals = [img["decoder"]["total_ms_per_token"] for img in per_image]
-    total_mpt_mean = statistics.mean(dec_totals)
+    total_mpt_mean = stat(dec_totals)["mean"]
     for key in dec_keys:
         vals = [img["decoder"]["layers"][key]["ms_per_token"] for img in per_image]
-        d = _ms(vals)
+        d = stat(vals)
         d["pct"] = (
             round(100.0 * d["mean"] / total_mpt_mean, 1) if total_mpt_mean > 0 else 0.0
         )
         dec_summary[key] = d
-    dec_summary["total"] = _ms(dec_totals)
+    dec_summary["total"] = stat(dec_totals)
 
-    n_tokens_vals = [img["n_tokens"] for img in per_image]
+    n_tokens_vals = [float(img["n_tokens"]) for img in per_image]
     return {
         "n_images": len(per_image),
-        "n_tokens": {
-            "mean": round(statistics.mean(n_tokens_vals), 1),
-            "std": round(
-                statistics.stdev(n_tokens_vals) if len(n_tokens_vals) > 1 else 0.0, 1
-            ),
-            "min": min(n_tokens_vals),
-            "max": max(n_tokens_vals),
-        },
+        "n_tokens": stat(n_tokens_vals),
         "encoder": enc_summary,
         "decoder": dec_summary,
     }
@@ -284,48 +269,40 @@ def main():
     pool = load_pool(
         cfg.pool, cfg.dataset, cfg.dataset_split, cfg.image_column, cfg.image_dir
     )
-    n_images = min(cfg.n_images, len(pool))
-    images = random.sample(pool, n_images)
-
-    sample_pv = (
-        processor(images[0], return_tensors="pt").pixel_values.to(dev).to(model.dtype)
-    )
-    input_shape = list(sample_pv.shape)
-    del sample_pv
 
     print(f"Warmup ({cfg.warmup} run(s))...")
-    pv_warmup = (
-        processor(images[0], return_tensors="pt").pixel_values.to(dev).to(model.dtype)
-    )
-    did_warmup = processor.tokenizer(
-        TASK_PROMPT, add_special_tokens=False, return_tensors="pt"
-    ).input_ids.to(dev)
     for _ in range(cfg.warmup):
-        run_pass(model, processor, pv_warmup, did_warmup)
+        [img] = sample_batch(pool, 1)
+        pv = processor(img, return_tensors="pt").pixel_values.to(dev).to(model.dtype)
+        did = processor.tokenizer(
+            TASK_PROMPT, add_special_tokens=False, return_tensors="pt"
+        ).input_ids.to(dev)
+        run_pass(model, processor, pv, did)
     torch.cuda.synchronize()
+
+    [sample_img] = sample_batch(pool, 1)
+    input_shape = list(
+        processor(sample_img, return_tensors="pt").pixel_values.shape
+    )
 
     timers, handles = register_timers(model)
 
     per_image: list[dict] = []
-    for i, img in enumerate(images):
-        print(f"  profiling image {i + 1}/{n_images}...", end="\r")
+    for _ in tqdm(range(cfg.n_images), desc="profiling"):
+        [img] = sample_batch(pool, 1)
         result = profile_one_image(model, processor, img, dev, timers)
         per_image.append(result)
 
         if cfg.save:
-            summary = aggregate(per_image)
             atomic_save_json(
-                cfg.save, build_results(cfg, input_shape, per_image, summary)
+                cfg.save,
+                build_results(cfg, input_shape, per_image, aggregate(per_image)),
             )
 
     remove_handles(handles)
-    print(f"  profiled {n_images} images          ")
 
     summary = aggregate(per_image)
     print_summary(summary)
-
-    if cfg.save and not per_image:
-        atomic_save_json(cfg.save, build_results(cfg, input_shape, per_image, summary))
 
 
 if __name__ == "__main__":

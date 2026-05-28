@@ -18,6 +18,7 @@ import torch
 from PIL import Image
 from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
+from tqdm import tqdm
 
 from inference.constants import DEFAULT_DATASET, TASK_PROMPT
 from inference.data import load_pool, sample_batch
@@ -223,7 +224,7 @@ def main():
     enc_peak_list: list[float] = []
     dec_peak_list: list[float] = []
 
-    for _ in range(cfg.runs):
+    for _ in tqdm(range(cfg.runs)):
         imgs = sample_batch(pool, cfg.batch_size)
         pre, enc, dec, e2e, n_tok, enc_peak, dec_peak = run_once(
             model, processor, imgs, dev, cfg.max_new_tokens

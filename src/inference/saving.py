@@ -10,4 +10,3 @@ def atomic_save_json(path: str | Path, data: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, p)
-    print(f"  saved → {p}")

@@ -151,11 +151,21 @@ def profile_one_image(
         decoder["layers"][label] = {
             "ms_per_token": round(total_ms / n_tokens if n_tokens > 0 else 0.0, 4),
             "total_ms": round(total_ms, 3),
+            "first_ms": round(samples[0], 4),
+            "tpot_ms": round(sum(samples[1:]) / (len(samples) - 1), 4)
+            if len(samples) > 1
+            else round(samples[0], 4),
             "samples": [round(v, 4) for v in samples],
         }
     dec_total_ms = sum(v["total_ms"] for v in decoder["layers"].values())
     decoder["total_ms_per_token"] = round(
         dec_total_ms / n_tokens if n_tokens > 0 else 0.0, 4
+    )
+    decoder["ttft_ms"] = round(
+        sum(v["first_ms"] for v in decoder["layers"].values()), 3
+    )
+    decoder["tpot_ms"] = round(
+        sum(v["tpot_ms"] for v in decoder["layers"].values()), 4
     )
 
     return {"n_tokens": n_tokens, "encoder": encoder, "decoder": decoder}
@@ -187,6 +197,8 @@ def aggregate(per_image: list[dict]) -> dict:
         )
         dec_summary[key] = d
     dec_summary["total"] = stat(dec_totals)
+    dec_summary["ttft_ms"] = stat([img["decoder"]["ttft_ms"] for img in per_image])
+    dec_summary["tpot_ms"] = stat([img["decoder"]["tpot_ms"] for img in per_image])
 
     n_tokens_vals = [float(img["n_tokens"]) for img in per_image]
     return {
@@ -203,29 +215,32 @@ def print_summary(summary: dict) -> None:
     n = summary["n_images"]
     tok = summary["n_tokens"]
     enc_total = enc["total"]["mean"]
-    dec_total = dec["total"]["mean"]
     col = 14
 
+    ttft = dec["ttft_ms"]["mean"]
+    tpot = dec["tpot_ms"]["mean"]
+
     print()
-    print("=" * 55)
+    print("=" * 60)
     print(f"  Encoder  (mean {enc_total:.1f} ms  over {n} images)")
-    print("  " + "-" * 51)
+    print("  " + "-" * 56)
     enc_keys = [k for k in enc if k != "total"]
     for key in sorted(enc_keys, key=lambda k: enc[k]["mean"], reverse=True):
         d = enc[key]
         print(f"  {key:<{col}} {d['mean']:7.1f} ms   {d['pct']:5.1f}%  ±{d['std']:.1f}")
     print()
     print(
-        f"  Decoder  (mean {dec_total:.2f} ms/tok  |  {tok['mean']:.0f} ± {tok['std']:.0f} tokens)"
+        f"  Decoder  (TTFT {ttft:.1f} ms  |  TPOT {tpot:.3f} ms/tok"
+        f"  |  {tok['mean']:.0f} ± {tok['std']:.0f} tokens)"
     )
-    print("  " + "-" * 51)
-    dec_keys = [k for k in dec if k != "total"]
+    print("  " + "-" * 56)
+    dec_keys = [k for k in dec if k != "total" and k not in ("ttft_ms", "tpot_ms")]
     for key in sorted(dec_keys, key=lambda k: dec[k]["mean"], reverse=True):
         d = dec[key]
         print(
             f"  {key:<{col}} {d['mean']:6.3f} ms/tok  {d['pct']:5.1f}%  ±{d['std']:.3f}"
         )
-    print("=" * 55)
+    print("=" * 60)
 
 
 def build_results(cfg: Settings, input_shape, per_image, summary) -> dict:

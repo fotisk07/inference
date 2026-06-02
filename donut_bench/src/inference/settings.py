@@ -23,4 +23,8 @@ class BenchSettings(BaseSettings):
     )
     warmup: int = Field(default=2, description="Warmup runs before measurement")
     no_patch: bool = Field(default=False, description="Skip attention mask patch")
+    backend: str = Field(
+        default="eager",
+        description="Attention backend: eager | sdpa | fa2",
+    )
     save: str | None = Field(default=None, description="Path to write JSON results")

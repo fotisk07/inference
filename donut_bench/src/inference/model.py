@@ -23,3 +23,22 @@ def apply_patch(model, device: str, no_patch: bool) -> str:
         return "applied (gpu direct)"
     patch_attn_mask(model)
     return "applied (cpu float32)"
+
+
+def apply_accel(model, device: str, backend: str, no_patch: bool) -> str:
+    """Apply mask patch and optional attention backend. Returns a label for logging."""
+    label = apply_patch(model, device, no_patch)
+    if backend == "eager":
+        return f"mask={label}, attn=eager"
+    from inference.accel.sdpa import activate_decoder_sdpa, patch_swin_sdpa
+    from inference.accel.fa2 import activate_decoder_fa2
+
+    if backend == "sdpa":
+        patch_swin_sdpa(model)
+        activate_decoder_sdpa(model)
+        return f"mask={label}, attn=sdpa"
+    if backend == "fa2":
+        patch_swin_sdpa(model)
+        activate_decoder_fa2(model)
+        return f"mask={label}, encoder=sdpa, decoder=fa2"
+    raise ValueError(f"Unknown backend: {backend!r}. Choose: eager, sdpa, fa2")

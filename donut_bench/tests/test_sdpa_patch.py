@@ -551,6 +551,11 @@ class TestSdpaEdgeCases:
         We verify: SDPA output is NOT the same as a computation with no bias.
         """
         attn = _make_self_attn(dim=128, num_heads=4)
+        # HuggingFace zero-initialises relative_position_bias_table; fill with
+        # non-zero random values so the bias has a measurable effect.
+        with torch.no_grad():
+            torch.manual_seed(42)
+            attn.relative_position_bias_table.normal_()
         hidden = _rand_hidden(4, 128)
 
         # SDPA output (includes rel_pos_bias)

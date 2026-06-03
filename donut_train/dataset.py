@@ -52,7 +52,7 @@ class DonutDataset(Dataset):
         image = (Image.open(img) if isinstance(img, (str, Path)) else img).convert("RGB")
         pixel_values = self.processor(image, return_tensors="pt").pixel_values.squeeze(0)
 
-        target_text = self.task_start_token + self.label_formatter.format(sample)
+        target_text = self.label_formatter.format(sample) + self.processor.tokenizer.eos_token
         tokenized = self.processor.tokenizer(
             target_text,
             add_special_tokens=False,

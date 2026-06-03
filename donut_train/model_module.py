@@ -26,6 +26,10 @@ class DonutModule(L.LightningModule):
             additional_tokens[0] if additional_tokens else processor.tokenizer.bos_token
         )
 
+    def on_train_epoch_start(self):
+        # from_pretrained() calls .eval() internally; re-assert train mode each epoch
+        self.model.train()
+
     def forward(self, pixel_values, labels):
         return self.model(pixel_values=pixel_values, labels=labels)
 

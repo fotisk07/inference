@@ -3,13 +3,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from torch.utils.data import DataLoader
-from transformers import DonutProcessor
-
 from dataset import DonutDataset, load_local_samples
 from label_formatter import LabelFormatter
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from model_module import DonutModule
+from torch.utils.data import DataLoader
+from transformers import DonutProcessor
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +38,9 @@ class Config:
 # DataModule
 # ---------------------------------------------------------------------------
 class DonutDataModule(L.LightningDataModule):
-    def __init__(self, config: Config, processor: DonutProcessor, label_formatter: LabelFormatter):
+    def __init__(
+        self, config: Config, processor: DonutProcessor, label_formatter: LabelFormatter
+    ):
         super().__init__()
         self.config = config
         self.processor = processor
@@ -101,7 +102,10 @@ def main():
     all_tokens = [config.task_start_token] + LabelFormatter.get_all_tokens()
 
     processor = DonutProcessor.from_pretrained(config.model_name)
-    processor.feature_extractor.size = {"height": config.image_size[0], "width": config.image_size[1]}
+    processor.image_processor.size = {
+        "height": config.image_size[0],
+        "width": config.image_size[1],
+    }
 
     model = DonutModule(
         model_name=config.model_name,
@@ -114,11 +118,31 @@ def main():
 
     # ── Overfit-one-batch sanity check ──────────────────────────────────────
     # Uncomment this block to verify the training loop is working correctly.
-    # The loss should drop close to zero within ~20 epochs on a single batch.
+    # Loss should drop below 1.0 within ~50 epochs on a single sample.
     # If it doesn't, something is wrong with the data pipeline or loss computation.
     #
-    # trainer = L.Trainer(overfit_batches=1, max_epochs=20, accelerator="auto")
-    # trainer.fit(model, datamodule=data_module)
+    # IMPORTANT: uses warmup_steps=0 — with only ~100 training steps a normal
+    # warmup (300 steps) keeps the LR near-zero for the entire run.
+    #
+    # overfit_model = DonutModule(
+    #     model_name=config.model_name,
+    #     processor=processor,
+    #     additional_tokens=all_tokens,
+    #     learning_rate=1e-3,
+    #     warmup_steps=0,
+    # )
+    # data_module.setup()
+    # import torch
+    # single_sample = [data_module.train_dataset[0]]
+    # overfit_loader = DataLoader(
+    #     single_sample,
+    #     batch_size=1,
+    #     collate_fn=lambda x: {k: torch.stack([d[k] for d in x]) for k in x[0]},
+    # )
+    # trainer = L.Trainer(
+    #     max_epochs=100, log_every_n_steps=1, accelerator="auto", enable_model_summary=False
+    # )
+    # trainer.fit(overfit_model, train_dataloaders=overfit_loader)
     # return
     # ────────────────────────────────────────────────────────────────────────
 
@@ -126,7 +150,12 @@ def main():
         max_epochs=config.max_epochs,
         accelerator="auto",
         callbacks=[
-            ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=3, filename="{epoch}-{val_loss:.4f}"),
+            ModelCheckpoint(
+                monitor="val_loss",
+                mode="min",
+                save_top_k=3,
+                filename="{epoch}-{val_loss:.4f}",
+            ),
             LearningRateMonitor(logging_interval="step"),
         ],
     )

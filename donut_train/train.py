@@ -1,23 +1,15 @@
-from dataclasses import dataclass, field
+import random
+from dataclasses import dataclass
+from pathlib import Path
 
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from torch.utils.data import DataLoader
 from transformers import DonutProcessor
 
-from dataset import DonutDataset
+from dataset import DonutDataset, load_local_samples
+from label_formatter import LabelFormatter
 from model_module import DonutModule
-
-
-# ---------------------------------------------------------------------------
-# Replace this with your real LabelFormatter import, e.g.:
-#   from label_formatter import LabelFormatter
-# ---------------------------------------------------------------------------
-class LabelFormatter:
-    """Stub — replace with your actual implementation."""
-
-    def format(self, sample: dict) -> str:
-        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -26,12 +18,12 @@ class LabelFormatter:
 @dataclass
 class Config:
     model_name: str = "naver-clova-ix/donut-base"
-    dataset_name: str = "naver-clova-ix/cord-v2"  # swap for your own HF dataset
 
-    # Token added at the start of every target sequence; also used as decoder_start_token
+    images_dir: str = "data/images"
+    annotations_dir: str = "data/annotations"
+    val_split: float = 0.2
+
     task_start_token: str = "<s_donut>"
-    # Any extra domain tokens the LabelFormatter uses (e.g. <champ>)
-    additional_tokens: list[str] = field(default_factory=lambda: ["<champ>"])
 
     max_target_length: int = 512
     image_size: tuple[int, int] = (1280, 960)
@@ -54,25 +46,32 @@ class DonutDataModule(L.LightningDataModule):
         self.label_formatter = label_formatter
 
     def setup(self, stage=None):
-        from datasets import load_dataset
+        samples = load_local_samples(
+            images_dir=Path(self.config.images_dir),
+            annotations_dir=Path(self.config.annotations_dir),
+        )
+        random.shuffle(samples)
 
-        raw = load_dataset(self.config.dataset_name)
-        all_tokens = [self.config.task_start_token] + self.config.additional_tokens
+        split = int(len(samples) * (1 - self.config.val_split))
+        train_samples = samples[:split]
+        val_samples = samples[split:]
 
         self.train_dataset = DonutDataset(
-            data=raw["train"],
+            data=train_samples,
             processor=self.processor,
             label_formatter=self.label_formatter,
             task_start_token=self.config.task_start_token,
             max_target_length=self.config.max_target_length,
         )
         self.val_dataset = DonutDataset(
-            data=raw["validation"],
+            data=val_samples,
             processor=self.processor,
             label_formatter=self.label_formatter,
             task_start_token=self.config.task_start_token,
             max_target_length=self.config.max_target_length,
         )
+
+        print(f"Dataset: {len(train_samples)} train, {len(val_samples)} val samples")
 
     def train_dataloader(self):
         return DataLoader(
@@ -98,11 +97,11 @@ class DonutDataModule(L.LightningDataModule):
 def main():
     config = Config()
 
+    label_formatter = LabelFormatter()
+    all_tokens = [config.task_start_token] + LabelFormatter.get_all_tokens()
+
     processor = DonutProcessor.from_pretrained(config.model_name)
     processor.feature_extractor.size = {"height": config.image_size[0], "width": config.image_size[1]}
-
-    all_tokens = [config.task_start_token] + config.additional_tokens
-    label_formatter = LabelFormatter()  # swap with your real class
 
     model = DonutModule(
         model_name=config.model_name,

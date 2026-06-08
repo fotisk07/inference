@@ -1,12 +1,12 @@
 FIELD_NAMES = [
-    "BR/COMISSION_PAYEMENT/calculo_do_imposto",
-    "BR/COMISSION_PAYEMENT/cep_prestador",
-    "BR/COMISSION_PAYEMENT/cpf_cnpj_prestador",
-    "BR/COMISSION_PAYEMENT/cpf_cnpj_tomador",
-    "BR/COMISSION_PAYEMENT/data_emissao",
-    "BR/COMISSION_PAYEMENT/numero_da_nota",
-    "BR/COMISSION_PAYEMENT/servico_prestado",
-    "BR/COMISSION_PAYEMENT/valor_da_nota",
+    "BR/COMISSION_PAYMENT/destinataire",
+    "BR/COMISSION_PAYMENT/E-mail",
+    "BR/COMISSION_PAYMENT/cpf_cnpj_prestador",
+    "BR/COMISSION_PAYMENT/cpf_cnpj_tomador",
+    "BR/COMISSION_PAYMENT/data_emissao",
+    "BR/COMISSION_PAYMENT/numero_da_nota",
+    "BR/COMISSION_PAYMENT/servico_prestado",
+    "BR/COMISSION_PAYMENT/valor_da_nota",
 ]
 
 
@@ -28,7 +28,9 @@ class LabelFormatter:
         Returns a string of present fields only:
           <field_a> value_a <field_a> <field_b> value_b <field_b> ...
         """
-        values = {f["field_name"]: f["annotator_text"].strip() for f in sample["fields"]}
+        values = {
+            f["field_name"]: f["annotator_text"].strip() for f in sample["fields"]
+        }
 
         parts = []
         for field_name in self.FIELDS:

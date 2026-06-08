@@ -1,0 +1,12 @@
+{
+    "fields": [
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+            "annotator_text": ""
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+            "annotator_text": "exemple@email.fr"
+        }
+    ]
+}

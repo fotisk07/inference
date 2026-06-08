@@ -160,7 +160,7 @@ def main() -> None:
                     eos_token_id=processor.tokenizer.eos_token_id,
                     pad_token_id=processor.tokenizer.pad_token_id,
                 )
-            predicted = processor.tokenizer.decode(gen_ids[0], skip_special_tokens=False)
+            predicted = processor.tokenizer.decode(gen_ids[0][1:], skip_special_tokens=False)
             print(f"\n  ┌─ Decode @ step {step+1} {'─'*38}")
             print(f"  │  Target : {target_text!r}")
             print(f"  │  Predict: {predicted!r}")

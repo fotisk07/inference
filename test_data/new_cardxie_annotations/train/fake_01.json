@@ -1,0 +1,16 @@
+{
+    "fields": [
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+            "annotator_text": "alice@example.com"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/data_emissao",
+            "annotator_text": "15/03/2024"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+            "annotator_text": "1250.00"
+        }
+    ]
+}

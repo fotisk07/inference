@@ -1,3 +1,12 @@
+"""
+Data loading and preprocessing for donut fine-tuning.
+
+Designed to be importable in notebooks:
+    from dataset import DonutDataset, build_processor
+    ds = DonutDataset(samples, processor)
+    print(ds[0]["target_text"])   # human-readable label
+"""
+
 import json
 from pathlib import Path
 
@@ -5,20 +14,61 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import DonutProcessor
 
+# ── Token vocabulary ──────────────────────────────────────────────────────────
+TASK_TOKEN = "<s_donut>"
+FIELD_TOKENS = [
+    "<destinataire>",
+    "<E-mail>",
+    "<cpf_cnpj_prestador>",
+    "<cpf_cnpj_tomador>",
+    "<data_emissao>",
+    "<numero_da_nota>",
+    "<servico_prestado>",
+    "<valor_da_nota>",
+]
+ALL_SPECIAL_TOKENS = [TASK_TOKEN] + FIELD_TOKENS
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 
 
-def load_local_samples(images_dir: Path, annotations_dir: Path) -> list[dict]:
+def build_processor(model_name: str) -> DonutProcessor:
+    """Load DonutProcessor and register all task + field tokens."""
+    processor = DonutProcessor.from_pretrained(model_name)
+    processor.tokenizer.add_special_tokens(
+        {"additional_special_tokens": ALL_SPECIAL_TOKENS}
+    )
+    return processor
+
+
+def format_label(fields: list[dict]) -> str:
     """
-    Pairs each image in images_dir with its matching JSON annotation file.
-    Skips images that have no corresponding annotation.
-    Returns a list of {"image": Path, "fields": [...]} dicts (images are not loaded yet).
+    Converts annotation fields to a token-wrapped string.
+    Derives the token name from the last segment of field_name (after '/'),
+    so it's robust to prefix typos in the annotation paths.
+
+    Example: {"field_name": "X/Y/E-mail", "annotator_text": "foo@bar.com"}
+             -> "<E-mail> foo@bar.com <E-mail>"
+    """
+    parts = []
+    for f in fields:
+        value = f.get("annotator_text", "").strip()
+        if value:
+            leaf = f["field_name"].split("/")[-1]
+            parts.append(f"<{leaf}> {value} <{leaf}>")
+    return " ".join(parts)
+
+
+def load_samples(images_dir: Path, annotations_dir: Path) -> list[dict]:
+    """
+    Pairs each image in images_dir with its matching JSON annotation.
+    Returns: [{"image": Path, "fields": [...]}, ...]
+    Skips images with no matching annotation.
     """
     samples = []
-    for img_path in sorted(images_dir.iterdir()):
+    for img_path in sorted(Path(images_dir).iterdir()):
         if img_path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
-        ann_path = annotations_dir / (img_path.stem + ".json")
+        ann_path = Path(annotations_dir) / (img_path.stem + ".json")
         if not ann_path.exists():
             continue
         with open(ann_path) as f:
@@ -28,35 +78,50 @@ def load_local_samples(images_dir: Path, annotations_dir: Path) -> list[dict]:
 
 
 class DonutDataset(Dataset):
+    """
+    Args:
+        samples:    list of {"image": Path, "fields": [...]} dicts from load_samples()
+        processor:  DonutProcessor from build_processor() — must have special tokens registered
+        max_length: maximum decoder sequence length (default 128)
+
+    Each item returns:
+        pixel_values  (3, H, W) float tensor
+        labels        (max_length,) int64 tensor, padding replaced with -100
+        target_text   str — the raw label string, useful for notebook inspection
+    """
+
     def __init__(
-        self,
-        data: list[dict],
-        processor: DonutProcessor,
-        label_formatter,
-        task_start_token: str,
-        max_target_length: int = 512,
+        self, samples: list[dict], processor: DonutProcessor, max_length: int = 128
     ):
-        self.data = data
+        self.samples = samples
         self.processor = processor
-        self.label_formatter = label_formatter
-        self.task_start_token = task_start_token
-        self.max_target_length = max_target_length
+        self.max_length = max_length
 
-    def __len__(self):
-        return len(self.data)
+    def __len__(self) -> int:
+        return len(self.samples)
 
-    def __getitem__(self, idx):
-        sample = self.data[idx]
+    def __getitem__(self, idx: int) -> dict:
+        sample = self.samples[idx]
 
         img = sample["image"]
-        image = (Image.open(img) if isinstance(img, (str, Path)) else img).convert("RGB")
-        pixel_values = self.processor(image, return_tensors="pt").pixel_values.squeeze(0)
+        image = (Image.open(img) if isinstance(img, (str, Path)) else img).convert(
+            "RGB"
+        )
+        pixel_values = self.processor(image, return_tensors="pt").pixel_values.squeeze(
+            0
+        )
 
-        target_text = self.label_formatter.format(sample) + self.processor.tokenizer.eos_token
+        # Labels: TASK_TOKEN first (naver-standard), then fields, then EOS
+        target_text = (
+            TASK_TOKEN
+            + format_label(sample["fields"])
+            + self.processor.tokenizer.eos_token
+        )
+
         tokenized = self.processor.tokenizer(
             target_text,
             add_special_tokens=False,
-            max_length=self.max_target_length,
+            max_length=self.max_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
@@ -64,4 +129,8 @@ class DonutDataset(Dataset):
         labels = tokenized.input_ids.squeeze(0).clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
 
-        return {"pixel_values": pixel_values, "labels": labels}
+        return {
+            "pixel_values": pixel_values,
+            "labels": labels,
+            "target_text": target_text,
+        }

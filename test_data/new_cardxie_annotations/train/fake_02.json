@@ -1,0 +1,20 @@
+{
+    "fields": [
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+            "annotator_text": "Bob Silva"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+            "annotator_text": "bob@company.br"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/cpf_cnpj_prestador",
+            "annotator_text": "123.456.789-00"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+            "annotator_text": "3400.50"
+        }
+    ]
+}

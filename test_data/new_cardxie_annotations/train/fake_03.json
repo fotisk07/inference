@@ -1,0 +1,20 @@
+{
+    "fields": [
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+            "annotator_text": "Carlos Ltd"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/numero_da_nota",
+            "annotator_text": "NF-20240399"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/servico_prestado",
+            "annotator_text": "Consultoria"
+        },
+        {
+            "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+            "annotator_text": "750.00"
+        }
+    ]
+}

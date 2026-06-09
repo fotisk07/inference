@@ -40,21 +40,46 @@ def build_processor(model_name: str) -> DonutProcessor:
     return processor
 
 
-def format_label(fields: list[dict]) -> str:
+def format_label(fields: list[dict], include_missing: bool = False) -> str:
     """
     Converts annotation fields to a token-wrapped string.
+
     Derives the token name from the last segment of field_name (after '/'),
     so it's robust to prefix typos in the annotation paths.
 
-    Example: {"field_name": "X/Y/E-mail", "annotator_text": "foo@bar.com"}
-             -> "<E-mail> foo@bar.com <E-mail>"
+    Duplicate field_names keep only the first occurrence.
+
+    include_missing=True: absent/empty fields appear as <token><token> so the
+    model explicitly learns "this field is not present" rather than never seeing
+    a signal for missing fields.
+
+    Examples:
+        present : "<E-mail> foo@bar.com <E-mail>"
+        missing : "<E-mail><E-mail>"   (only when include_missing=True)
     """
-    parts = []
+    # deduplicate: keep first occurrence of each field_name
+    seen: set[str] = set()
+    deduped = []
     for f in fields:
-        value = f.get("annotator_text", "").strip()
+        if f["field_name"] not in seen:
+            seen.add(f["field_name"])
+            deduped.append(f)
+
+    values = {
+        f["field_name"].split("/")[-1]: f.get("annotator_text", "").strip()
+        for f in deduped
+    }
+
+    # iterate in canonical FIELD_TOKENS order for deterministic output
+    parts = []
+    for token in FIELD_TOKENS:
+        leaf = token[1:-1]  # "<E-mail>" → "E-mail"
+        value = values.get(leaf, "")
         if value:
-            leaf = f["field_name"].split("/")[-1]
-            parts.append(f"<{leaf}> {value} <{leaf}>")
+            parts.append(f"{token} {value} {token}")
+        elif include_missing:
+            parts.append(f"{token}{token}")
+
     return " ".join(parts)
 
 
@@ -91,11 +116,16 @@ class DonutDataset(Dataset):
     """
 
     def __init__(
-        self, samples: list[dict], processor: DonutProcessor, max_length: int = 128
+        self,
+        samples: list[dict],
+        processor: DonutProcessor,
+        max_length: int = 128,
+        include_missing: bool = False,
     ):
         self.samples = samples
         self.processor = processor
         self.max_length = max_length
+        self.include_missing = include_missing
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -114,7 +144,7 @@ class DonutDataset(Dataset):
         # Labels: TASK_TOKEN first (naver-standard), then fields, then EOS
         target_text = (
             TASK_TOKEN
-            + format_label(sample["fields"])
+            + format_label(sample["fields"], self.include_missing)
             + self.processor.tokenizer.eos_token
         )
 

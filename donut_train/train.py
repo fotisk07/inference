@@ -9,6 +9,7 @@ the "# extend:" comments — those are the exact spots to add them.
 """
 
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,9 @@ class Config:
     annotations_dir: str = "../test_data/new_cardxie_annotations/train"
     val_split: float = 0.2
 
+    # (height, width) — donut-base pretrain default; reduce to save GPU memory
+    image_size: tuple[int, int] = (1280, 960)
+
     max_length: int = 128
     batch_size: int = 4
     num_workers: int = 4
@@ -38,6 +42,11 @@ class Config:
 
     output_dir: str = "checkpoints"
     save_every_n_epochs: int = 1
+
+    # When True: encodes fields as <s_field>value</s_field> — output parseable
+    # with processor.token2json(seq) after stripping task/pad/EOS tokens.
+    # When False (default): legacy symmetric format <field> value <field>.
+    token2json_format: bool = False
 
     device: str = field(
         default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
@@ -74,12 +83,14 @@ def train(config: Config) -> None:
     print(f"\n{'=' * 60}")
     print(f"  Donut fine-tuning")
     print(
-        f"  device={config.device}  lr={config.lr}  batch={config.batch_size}  epochs={config.max_epochs}"
+        f"  device={config.device}  lr={config.lr}  batch={config.batch_size}"
+        f"  epochs={config.max_epochs}  image={config.image_size[0]}×{config.image_size[1]}"
     )
     print(f"{'=' * 60}\n")
 
     # --- data ---
-    processor = build_processor(config.model_name)
+    processor = build_processor(config.model_name, config.token2json_format)
+    processor.image_processor.size = {"height": config.image_size[0], "width": config.image_size[1]}
     samples = load_samples(Path(config.images_dir), Path(config.annotations_dir))
     if not samples:
         raise ValueError(f"No samples found in {config.images_dir}")
@@ -89,8 +100,8 @@ def train(config: Config) -> None:
     train_samples, val_samples = samples[:split], samples[split:]
     print(f"Dataset: {len(train_samples)} train, {len(val_samples)} val")
 
-    train_ds = DonutDataset(train_samples, processor, config.max_length)
-    val_ds = DonutDataset(val_samples, processor, config.max_length)
+    train_ds = DonutDataset(train_samples, processor, config.max_length, token2json_format=config.token2json_format)
+    val_ds = DonutDataset(val_samples, processor, config.max_length, token2json_format=config.token2json_format)
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
@@ -126,6 +137,9 @@ def train(config: Config) -> None:
         # --- train epoch ---
         model.train()
         epoch_loss = 0.0
+        docs_trained = 0
+        epoch_start = time.time()
+
         for batch in train_loader:
             pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
@@ -138,19 +152,24 @@ def train(config: Config) -> None:
             optimizer.zero_grad()
 
             epoch_loss += loss.item()
+            docs_trained += pixel_values.shape[0]
             global_step += 1
             # extend: mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
 
+        epoch_secs = time.time() - epoch_start
         train_loss = epoch_loss / len(train_loader)
+        docs_per_sec = docs_trained / epoch_secs
 
         # --- validation ---
         val_loss = evaluate(model, val_loader, config.device)
         model.train()
 
         print(
-            f"Epoch {epoch + 1:3d}/{config.max_epochs}  train={train_loss:.4f}  val={val_loss:.4f}"
+            f"Epoch {epoch + 1:3d}/{config.max_epochs}"
+            f"  train={train_loss:.4f}  val={val_loss:.4f}"
+            f"  │  {docs_per_sec:.1f} docs/s  {epoch_secs:.0f}s"
         )
-        # extend: mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss}, step=epoch)
+        # extend: mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss, "docs_per_sec": docs_per_sec}, step=epoch)
 
         # --- checkpoint ---
         if (epoch + 1) % config.save_every_n_epochs == 0:

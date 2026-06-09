@@ -16,6 +16,8 @@ from transformers import DonutProcessor
 
 # ── Token vocabulary ──────────────────────────────────────────────────────────
 TASK_TOKEN = "<s_donut>"
+
+# Legacy symmetric format: <field> value <field>
 FIELD_TOKENS = [
     "<destinataire>",
     "<E-mail>",
@@ -28,19 +30,36 @@ FIELD_TOKENS = [
 ]
 ALL_SPECIAL_TOKENS = [TASK_TOKEN] + FIELD_TOKENS
 
+# token2json-compatible format: <s_field>value</s_field>
+# Compatible with processor.token2json() for structured inference decoding.
+FIELD_TOKENS_T2J: list[tuple[str, str]] = [
+    ("<s_destinataire>", "</s_destinataire>"),
+    ("<s_E-mail>", "</s_E-mail>"),
+    ("<s_cpf_cnpj_prestador>", "</s_cpf_cnpj_prestador>"),
+    ("<s_cpf_cnpj_tomador>", "</s_cpf_cnpj_tomador>"),
+    ("<s_data_emissao>", "</s_data_emissao>"),
+    ("<s_numero_da_nota>", "</s_numero_da_nota>"),
+    ("<s_servico_prestado>", "</s_servico_prestado>"),
+    ("<s_valor_da_nota>", "</s_valor_da_nota>"),
+]
+ALL_SPECIAL_TOKENS_T2J = [TASK_TOKEN] + [t for pair in FIELD_TOKENS_T2J for t in pair]
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 
 
-def build_processor(model_name: str) -> DonutProcessor:
+def build_processor(model_name: str, token2json_format: bool = False) -> DonutProcessor:
     """Load DonutProcessor and register all task + field tokens."""
     processor = DonutProcessor.from_pretrained(model_name)
-    processor.tokenizer.add_special_tokens(
-        {"additional_special_tokens": ALL_SPECIAL_TOKENS}
-    )
+    tokens = ALL_SPECIAL_TOKENS_T2J if token2json_format else ALL_SPECIAL_TOKENS
+    processor.tokenizer.add_special_tokens({"additional_special_tokens": tokens})
     return processor
 
 
-def format_label(fields: list[dict], include_missing: bool = False) -> str:
+def format_label(
+    fields: list[dict],
+    include_missing: bool = False,
+    token2json_format: bool = False,
+) -> str:
     """
     Converts annotation fields to a token-wrapped string.
 
@@ -49,13 +68,13 @@ def format_label(fields: list[dict], include_missing: bool = False) -> str:
 
     Duplicate field_names keep only the first occurrence.
 
-    include_missing=True: absent/empty fields appear as <token><token> so the
-    model explicitly learns "this field is not present" rather than never seeing
-    a signal for missing fields.
-
-    Examples:
+    token2json_format=False (default):
         present : "<E-mail> foo@bar.com <E-mail>"
         missing : "<E-mail><E-mail>"   (only when include_missing=True)
+
+    token2json_format=True — compatible with processor.token2json():
+        present : "<s_E-mail>foo@bar.com</s_E-mail>"
+        missing : "<s_E-mail></s_E-mail>"   (only when include_missing=True)
     """
     # deduplicate: keep first occurrence of each field_name
     seen: set[str] = set()
@@ -70,17 +89,25 @@ def format_label(fields: list[dict], include_missing: bool = False) -> str:
         for f in deduped
     }
 
-    # iterate in canonical FIELD_TOKENS order for deterministic output
     parts = []
-    for token in FIELD_TOKENS:
-        leaf = token[1:-1]  # "<E-mail>" → "E-mail"
-        value = values.get(leaf, "")
-        if value:
-            parts.append(f"{token} {value} {token}")
-        elif include_missing:
-            parts.append(f"{token}{token}")
-
-    return " ".join(parts)
+    if token2json_format:
+        for open_tok, close_tok in FIELD_TOKENS_T2J:
+            leaf = open_tok[3:-1]  # "<s_E-mail>" → "E-mail"
+            value = values.get(leaf, "")
+            if value:
+                parts.append(f"{open_tok}{value}{close_tok}")
+            elif include_missing:
+                parts.append(f"{open_tok}{close_tok}")
+        return "".join(parts)
+    else:
+        for token in FIELD_TOKENS:
+            leaf = token[1:-1]  # "<E-mail>" → "E-mail"
+            value = values.get(leaf, "")
+            if value:
+                parts.append(f"{token} {value} {token}")
+            elif include_missing:
+                parts.append(f"{token}{token}")
+        return " ".join(parts)
 
 
 def load_samples(images_dir: Path, annotations_dir: Path) -> list[dict]:
@@ -121,11 +148,13 @@ class DonutDataset(Dataset):
         processor: DonutProcessor,
         max_length: int = 128,
         include_missing: bool = False,
+        token2json_format: bool = False,
     ):
         self.samples = samples
         self.processor = processor
         self.max_length = max_length
         self.include_missing = include_missing
+        self.token2json_format = token2json_format
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -144,7 +173,7 @@ class DonutDataset(Dataset):
         # Labels: TASK_TOKEN first (naver-standard), then fields, then EOS
         target_text = (
             TASK_TOKEN
-            + format_label(sample["fields"], self.include_missing)
+            + format_label(sample["fields"], self.include_missing, self.token2json_format)
             + self.processor.tokenizer.eos_token
         )
 

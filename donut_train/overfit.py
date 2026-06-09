@@ -27,6 +27,7 @@ MAX_STEPS = 300
 DECODE_EVERY = 25
 PASS_THRESHOLD = 0.5
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TOKEN2JSON_FORMAT = False  # set True to use <s_field>value</s_field> encoding
 
 
 def main() -> None:
@@ -39,7 +40,7 @@ def main() -> None:
 
     # --- setup ---
     print(f"Loading processor and model from {MODEL_NAME} ...")
-    processor = build_processor(MODEL_NAME)
+    processor = build_processor(MODEL_NAME, TOKEN2JSON_FORMAT)
     model = build_model(processor, MODEL_NAME).to(DEVICE)
     print(f"Vocab size: {len(processor.tokenizer)}\n")
 
@@ -51,7 +52,9 @@ def main() -> None:
         annotation = json.load(f)
 
     target_text = (
-        TASK_TOKEN + format_label(annotation["fields"]) + processor.tokenizer.eos_token
+        TASK_TOKEN
+        + format_label(annotation["fields"], token2json_format=TOKEN2JSON_FORMAT)
+        + processor.tokenizer.eos_token
     )
     tokenized = processor.tokenizer(
         target_text,

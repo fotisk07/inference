@@ -9,4 +9,5 @@ dependencies = [
     "transformers>=4.40.0",
     "pillow>=10.0.0",
     "sentencepiece>=0.1.99",
+    "mlflow>=3.13.0",
 ]

@@ -8,11 +8,13 @@ To add MLflow, gradient clipping, early stopping, etc., look for
 the "# extend:" comments — those are the exact spots to add them.
 """
 
+import dataclasses
 import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import mlflow
 import torch
 from torch.utils.data import DataLoader
 from transformers import VisionEncoderDecoderModel, get_linear_schedule_with_warmup
@@ -42,6 +44,9 @@ class Config:
 
     output_dir: str = "checkpoints"
     save_every_n_epochs: int = 1
+
+    # Set to an experiment name to enable MLflow logging, None to disable.
+    mlflow_experiment: str | None = None
 
     # When True: encodes fields as <s_field>value</s_field> — output parseable
     # with processor.token2json(seq) after stripping task/pad/EOS tokens.
@@ -87,6 +92,12 @@ def train(config: Config) -> None:
         f"  epochs={config.max_epochs}  image={config.image_size[0]}×{config.image_size[1]}"
     )
     print(f"{'=' * 60}\n")
+
+    # --- mlflow ---
+    if config.mlflow_experiment:
+        mlflow.set_experiment(config.mlflow_experiment)
+        mlflow.start_run(run_name=f"lr{config.lr}-bs{config.batch_size}")
+        mlflow.log_params(dataclasses.asdict(config))
 
     # --- data ---
     processor = build_processor(config.model_name, config.token2json_format)
@@ -154,7 +165,8 @@ def train(config: Config) -> None:
             epoch_loss += loss.item()
             docs_trained += pixel_values.shape[0]
             global_step += 1
-            # extend: mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
+            if config.mlflow_experiment:
+                mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
 
         epoch_secs = time.time() - epoch_start
         train_loss = epoch_loss / len(train_loader)
@@ -169,7 +181,11 @@ def train(config: Config) -> None:
             f"  train={train_loss:.4f}  val={val_loss:.4f}"
             f"  │  {docs_per_sec:.1f} docs/s  {epoch_secs:.0f}s"
         )
-        # extend: mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss, "docs_per_sec": docs_per_sec}, step=epoch)
+        if config.mlflow_experiment:
+            mlflow.log_metrics(
+                {"train_loss": train_loss, "val_loss": val_loss, "docs_per_sec": docs_per_sec},
+                step=epoch + 1,
+            )
 
         # --- checkpoint ---
         if (epoch + 1) % config.save_every_n_epochs == 0:
@@ -183,6 +199,8 @@ def train(config: Config) -> None:
             print(f"           saved → {ckpt_path}")
 
     print("\nTraining complete.")
+    if config.mlflow_experiment:
+        mlflow.end_run()
 
 
 if __name__ == "__main__":

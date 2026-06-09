@@ -164,9 +164,7 @@ def profile_one_image(
     decoder["ttft_ms"] = round(
         sum(v["first_ms"] for v in decoder["layers"].values()), 3
     )
-    decoder["tpot_ms"] = round(
-        sum(v["tpot_ms"] for v in decoder["layers"].values()), 4
-    )
+    decoder["tpot_ms"] = round(sum(v["tpot_ms"] for v in decoder["layers"].values()), 4)
 
     return {"n_tokens": n_tokens, "encoder": encoder, "decoder": decoder}
 
@@ -296,9 +294,7 @@ def main():
     torch.cuda.synchronize()
 
     [sample_img] = sample_batch(pool, 1)
-    input_shape = list(
-        processor(sample_img, return_tensors="pt").pixel_values.shape
-    )
+    input_shape = list(processor(sample_img, return_tensors="pt").pixel_values.shape)
 
     timers, handles = register_timers(model)
 

@@ -1,0 +1,20 @@
+[project]
+name = "donut-train"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.12.0",
+    "transformers>=4.40.0",
+    "pillow>=10.0.0",
+    "sentencepiece>=0.1.99",
+    "mlflow>=3.13.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0.3",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]

@@ -17,6 +17,8 @@ import types
 import torch
 import torch.nn.functional as F
 
+from donut.accel.registry import Optimization, register
+
 
 def _sdpa_self_forward(
     self,
@@ -96,6 +98,76 @@ def patch_swin_sdpa(model) -> None:
             self_attn._sdpa_patched = True
 
 
+def revert_swin_sdpa(model) -> None:
+    """Undo patch_swin_sdpa: restore the original eager forward on every block."""
+    for stage in model.encoder.encoder.layers:
+        for block in stage.blocks:
+            self_attn = block.attention.self
+            if not hasattr(self_attn, "_sdpa_patched"):
+                continue
+            # Deleting the instance forward restores the class method; the saved
+            # _original_forward was that same bound method.
+            del self_attn.forward
+            del self_attn._original_forward
+            del self_attn._sdpa_patched
+
+
 def activate_decoder_sdpa(model) -> None:
     """Activate PyTorch SDPA for the MBart decoder via its built-in dispatch."""
     model.decoder.config._attn_implementation = "sdpa"
+
+
+@register
+class EncoderSDPA(Optimization):
+    """Monkey-patch DonutSwinSelfAttention.forward to use SDPA.
+
+    Required because DonutSwin is a legacy class with no attn-impl dispatch.
+    Depends on MaskCache, whose cached cyclic-shift bias is fed to SDPA's
+    attn_mask. Reverting restores the original eager forward.
+    """
+
+    name = "encoder_sdpa"
+
+    def apply(self, model) -> None:
+        patch_swin_sdpa(model)
+
+    def revert(self, model) -> None:
+        revert_swin_sdpa(model)
+
+    def check_structural(self, model) -> None:
+        for i, stage in enumerate(model.encoder.encoder.layers):
+            for j, block in enumerate(stage.blocks):
+                self_attn = block.attention.self
+                assert getattr(self_attn, "_sdpa_patched", False), (
+                    f"Stage {i} block {j} encoder self-attention is not SDPA-patched"
+                )
+
+
+class _DecoderAttnImpl(Optimization):
+    """Base for decoder optimizations that flip config._attn_implementation.
+
+    Stores the previous value on apply so revert restores it exactly.
+    """
+
+    impl: str = "eager"
+
+    def apply(self, model) -> None:
+        self._prev = getattr(model.decoder.config, "_attn_implementation", "eager")
+        model.decoder.config._attn_implementation = self.impl
+
+    def revert(self, model) -> None:
+        model.decoder.config._attn_implementation = getattr(self, "_prev", "eager")
+
+    def check_structural(self, model) -> None:
+        impl = model.decoder.config._attn_implementation
+        assert impl == self.impl, (
+            f"Decoder attn_implementation is {impl!r}, expected {self.impl!r}"
+        )
+
+
+@register
+class DecoderSDPA(_DecoderAttnImpl):
+    """Activate PyTorch SDPA on the MBart decoder via its built-in dispatch."""
+
+    name = "decoder_sdpa"
+    impl = "sdpa"

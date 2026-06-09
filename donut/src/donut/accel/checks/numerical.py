@@ -8,6 +8,7 @@ numerically close to (or identical to) the eager baseline.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,7 +27,7 @@ def _make_inputs(
     """Return (pixel_values, decoder_input_ids) on model.device with synthetic data."""
     gen = torch.Generator()
     gen.manual_seed(seed)
-    img_size = model.encoder.config.image_size  # (H, W)
+    img_size = model.encoder.config.image_size
     H, W = (img_size, img_size) if isinstance(img_size, int) else img_size
     pixel_values = torch.randn(
         batch_size,
@@ -47,6 +48,28 @@ def _make_inputs(
     return pixel_values, decoder_input_ids
 
 
+@contextmanager
+def _eager_encoder(model: VisionEncoderDecoderModel):
+    """Temporarily restore original eager forward on SDPA-patched encoder blocks.
+
+    If SDPA is applied, each block stores _original_forward. This context manager
+    swaps it back for the duration, allowing a fair eager vs. accel comparison
+    without loading a second model.
+    """
+    swapped = []
+    for stage in model.encoder.encoder.layers:
+        for block in stage.blocks:
+            sa = block.attention.self
+            if hasattr(sa, "_sdpa_patched"):
+                swapped.append((sa, sa.forward))
+                sa.forward = sa._original_forward
+    try:
+        yield
+    finally:
+        for sa, fwd in swapped:
+            sa.forward = fwd
+
+
 def check_encoder_accuracy(
     model: VisionEncoderDecoderModel,
     processor: DonutProcessor,
@@ -56,24 +79,18 @@ def check_encoder_accuracy(
     p99_tol: float = 1.0,
     seed: int = 42,
 ) -> dict:
-    """Compare encoder output (eager baseline) vs current backend.
+    """Compare encoder output with SDPA patch vs eager baseline.
 
-    Temporarily sets decoder to eager to isolate encoder differences, then
-    restores the original decoder config. Returns error statistics dict.
+    Uses _eager_encoder to temporarily restore original forward, producing a
+    genuine eager vs. accelerated comparison without loading a second model.
+    Returns error statistics dict.
     """
     pixel_values, _ = _make_inputs(model, processor, batch_size=batch_size, seed=seed)
-    saved_impl = model.decoder.config._attn_implementation
 
     with torch.no_grad():
-        # Eager encoder baseline: temporarily disable any encoder SDPA patch
-        # by calling the original forward if available, else run as-is
-        enc_eager = model.encoder(pixel_values, return_dict=True)
-
-        # Re-run: for backends other than EAGER the encoder is already patched,
-        # so this is the accelerated version
+        with _eager_encoder(model):
+            enc_eager = model.encoder(pixel_values, return_dict=True)
         enc_accel = model.encoder(pixel_values, return_dict=True)
-
-    model.decoder.config._attn_implementation = saved_impl
 
     abs_err = (enc_eager.last_hidden_state - enc_accel.last_hidden_state).abs()
     n = abs_err.numel()
@@ -123,7 +140,7 @@ def check_decoder_accuracy(
 
     eager_out = _generate("eager")
     accel_out = _generate(saved_impl)
-    model.decoder.config._attn_implementation = saved_impl  # restore
+    model.decoder.config._attn_implementation = saved_impl
 
     exact_match = sum(a == b for a, b in zip(eager_out, accel_out))
     ok = exact_match == batch_size

@@ -16,6 +16,8 @@ import types
 
 import torch
 
+from donut.accel.registry import Optimization, register
+
 
 def _make_cpu_variant(device):
     def _get_attn_mask_cached(self, height, width, dtype, device=device):
@@ -87,3 +89,47 @@ def apply_mask_cache(model) -> None:
                 continue
             block.get_attn_mask = types.MethodType(cached_fn, block)
             block._mask_cache_applied = True
+
+
+def revert_mask_cache(model) -> None:
+    """Undo apply_mask_cache: restore the class get_attn_mask and drop caches.
+
+    Deleting the per-instance attributes makes each block fall back to the
+    original DonutSwinSelfAttention.get_attn_mask defined on the class.
+    """
+    for stage in model.encoder.encoder.layers:
+        for block in stage.blocks:
+            if not hasattr(block, "_mask_cache_applied"):
+                continue
+            # Instance attrs shadow the class method; deleting restores the original.
+            del block.get_attn_mask
+            del block._mask_cache_applied
+            if hasattr(block, "_mask_cache"):
+                del block._mask_cache
+
+
+@register
+class MaskCache(Optimization):
+    """Cache the cyclic-shift Swin attention mask by (height, width, dtype).
+
+    Universally beneficial and a prerequisite for the SDPA encoder patch, which
+    consumes the cached additive bias. Always first in a preset.
+    """
+
+    name = "mask_cache"
+
+    def apply(self, model) -> None:
+        apply_mask_cache(model)
+
+    def revert(self, model) -> None:
+        revert_mask_cache(model)
+
+    def check_structural(self, model) -> None:
+        for i, stage in enumerate(model.encoder.encoder.layers):
+            for j, block in enumerate(stage.blocks):
+                if block.shift_size == 0:
+                    continue
+                assert getattr(block, "_mask_cache_applied", False), (
+                    f"Stage {i} block {j} (shift_size={block.shift_size}) "
+                    "does not have mask caching applied — apply MaskCache first"
+                )

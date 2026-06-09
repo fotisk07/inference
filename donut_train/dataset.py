@@ -173,7 +173,9 @@ class DonutDataset(Dataset):
         # Labels: TASK_TOKEN first (naver-standard), then fields, then EOS
         target_text = (
             TASK_TOKEN
-            + format_label(sample["fields"], self.include_missing, self.token2json_format)
+            + format_label(
+                sample["fields"], self.include_missing, self.token2json_format
+            )
             + self.processor.tokenizer.eos_token
         )
 

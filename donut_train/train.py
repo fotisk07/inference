@@ -1,30 +1,34 @@
 """
 Donut fine-tuning training script.
 
-Configure via the Config dataclass at the top, then run:
+Run with defaults:
     cd donut_train && uv run python train.py
 
-To add MLflow, gradient clipping, early stopping, etc., look for
+Override any field from the CLI:
+    uv run python train.py --lr 1e-4 --batch_size 8 --mlflow_experiment my-exp
+    uv run python train.py --image_size '[640,480]'   # tuples as JSON
+
+To add gradient clipping, early stopping, etc., look for
 the "# extend:" comments — those are the exact spots to add them.
 """
 
-import dataclasses
 import random
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import mlflow
 import torch
+from dataset import DonutDataset, build_processor, load_samples
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader
 from transformers import VisionEncoderDecoderModel, get_linear_schedule_with_warmup
 
-from dataset import DonutDataset, build_processor, load_samples
-
 
 # ── Config ────────────────────────────────────────────────────────────────────
-@dataclass
-class Config:
+class Config(BaseSettings):
+    model_config = SettingsConfigDict(cli_parse_args=True)
+
     model_name: str = "naver-clova-ix/donut-base"
 
     images_dir: str = "../test_data/images/train"
@@ -47,13 +51,15 @@ class Config:
 
     # Set to an experiment name to enable MLflow logging, None to disable.
     mlflow_experiment: str | None = None
+    # Name shown in the MLflow UI for this run; auto-generated from lr+bs if None.
+    run_name: str | None = None
 
     # When True: encodes fields as <s_field>value</s_field> — output parseable
     # with processor.token2json(seq) after stripping task/pad/EOS tokens.
     # When False (default): legacy symmetric format <field> value <field>.
     token2json_format: bool = False
 
-    device: str = field(
+    device: str = Field(
         default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
     )
 
@@ -86,7 +92,7 @@ def evaluate(
 # ── Training loop ─────────────────────────────────────────────────────────────
 def train(config: Config) -> None:
     print(f"\n{'=' * 60}")
-    print(f"  Donut fine-tuning")
+    print("  Donut fine-tuning")
     print(
         f"  device={config.device}  lr={config.lr}  batch={config.batch_size}"
         f"  epochs={config.max_epochs}  image={config.image_size[0]}×{config.image_size[1]}"
@@ -96,12 +102,16 @@ def train(config: Config) -> None:
     # --- mlflow ---
     if config.mlflow_experiment:
         mlflow.set_experiment(config.mlflow_experiment)
-        mlflow.start_run(run_name=f"lr{config.lr}-bs{config.batch_size}")
-        mlflow.log_params(dataclasses.asdict(config))
+        run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
+        mlflow.start_run(run_name=run_name)
+        mlflow.log_params(config.model_dump())
 
     # --- data ---
     processor = build_processor(config.model_name, config.token2json_format)
-    processor.image_processor.size = {"height": config.image_size[0], "width": config.image_size[1]}
+    processor.image_processor.size = {
+        "height": config.image_size[0],
+        "width": config.image_size[1],
+    }
     samples = load_samples(Path(config.images_dir), Path(config.annotations_dir))
     if not samples:
         raise ValueError(f"No samples found in {config.images_dir}")
@@ -111,8 +121,18 @@ def train(config: Config) -> None:
     train_samples, val_samples = samples[:split], samples[split:]
     print(f"Dataset: {len(train_samples)} train, {len(val_samples)} val")
 
-    train_ds = DonutDataset(train_samples, processor, config.max_length, token2json_format=config.token2json_format)
-    val_ds = DonutDataset(val_samples, processor, config.max_length, token2json_format=config.token2json_format)
+    train_ds = DonutDataset(
+        train_samples,
+        processor,
+        config.max_length,
+        token2json_format=config.token2json_format,
+    )
+    val_ds = DonutDataset(
+        val_samples,
+        processor,
+        config.max_length,
+        token2json_format=config.token2json_format,
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
@@ -183,7 +203,11 @@ def train(config: Config) -> None:
         )
         if config.mlflow_experiment:
             mlflow.log_metrics(
-                {"train_loss": train_loss, "val_loss": val_loss, "docs_per_sec": docs_per_sec},
+                {
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "docs_per_sec": docs_per_sec,
+                },
                 step=epoch + 1,
             )
 

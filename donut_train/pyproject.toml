@@ -10,4 +10,5 @@ dependencies = [
     "pillow>=10.0.0",
     "sentencepiece>=0.1.99",
     "mlflow>=3.13.0",
+    "pydantic-settings>=2.0",
 ]

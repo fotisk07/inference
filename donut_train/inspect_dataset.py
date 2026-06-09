@@ -17,7 +17,6 @@ from dataset import (
     ALL_SPECIAL_TOKENS_T2J,
     FIELD_TOKENS,
     FIELD_TOKENS_T2J,
-    TASK_TOKEN,
     DonutDataset,
     build_processor,
     load_samples,
@@ -100,7 +99,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"\n{'═' * 64}")
-    print(f"  Donut dataset inspection")
+    print("  Donut dataset inspection")
     print(f"  images     : {args.images_dir}")
     print(f"  annotations: {args.annotations_dir}")
     print(f"  max_length : {args.max_length}")

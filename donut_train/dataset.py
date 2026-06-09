@@ -1,50 +1,28 @@
-"""
-Data loading and preprocessing for donut fine-tuning.
-
-Designed to be importable in notebooks:
-    from dataset import DonutDataset, build_processor
-    ds = DonutDataset(samples, processor)
-    print(ds[0]["target_text"])   # human-readable label
-"""
-
 import json
 from pathlib import Path
 
+import yaml
 from PIL import Image
 from torch.utils.data import Dataset
 from transformers import DonutProcessor
 
-# ── Token vocabulary ──────────────────────────────────────────────────────────
-TASK_TOKEN = "<s_donut>"
+_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+with open(_CONFIG_PATH) as _f:
+    _cfg = yaml.safe_load(_f)
 
-# Legacy symmetric format: <field> value <field>
-FIELD_TOKENS = [
-    "<destinataire>",
-    "<E-mail>",
-    "<cpf_cnpj_prestador>",
-    "<cpf_cnpj_tomador>",
-    "<data_emissao>",
-    "<numero_da_nota>",
-    "<servico_prestado>",
-    "<valor_da_nota>",
-]
-ALL_SPECIAL_TOKENS = [TASK_TOKEN] + FIELD_TOKENS
+TASK_TOKEN: str = _cfg["TASK_TOKEN"]
+FIELD_TOKENS: list[str] = _cfg["FIELD_TOKENS"]
+ALL_SPECIAL_TOKENS: list[str] = [TASK_TOKEN] + FIELD_TOKENS
 
-# token2json-compatible format: <s_field>value</s_field>
-# Compatible with processor.token2json() for structured inference decoding.
+# Derive token2json open/close pairs: "<E-mail>" → ("<s_E-mail>", "</s_E-mail>")
 FIELD_TOKENS_T2J: list[tuple[str, str]] = [
-    ("<s_destinataire>", "</s_destinataire>"),
-    ("<s_E-mail>", "</s_E-mail>"),
-    ("<s_cpf_cnpj_prestador>", "</s_cpf_cnpj_prestador>"),
-    ("<s_cpf_cnpj_tomador>", "</s_cpf_cnpj_tomador>"),
-    ("<s_data_emissao>", "</s_data_emissao>"),
-    ("<s_numero_da_nota>", "</s_numero_da_nota>"),
-    ("<s_servico_prestado>", "</s_servico_prestado>"),
-    ("<s_valor_da_nota>", "</s_valor_da_nota>"),
+    (f"<s_{tok[1:-1]}>", f"</s_{tok[1:-1]}>") for tok in FIELD_TOKENS
 ]
-ALL_SPECIAL_TOKENS_T2J = [TASK_TOKEN] + [t for pair in FIELD_TOKENS_T2J for t in pair]
+ALL_SPECIAL_TOKENS_T2J: list[str] = [TASK_TOKEN] + [
+    t for pair in FIELD_TOKENS_T2J for t in pair
+]
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+IMAGE_EXTENSIONS: set[str] = set(_cfg["IMAGE_EXTENSIONS"])
 
 
 def build_processor(model_name: str, token2json_format: bool = False) -> DonutProcessor:
@@ -110,23 +88,12 @@ def format_label(
         return " ".join(parts)
 
 
-def load_samples(images_dir: Path, annotations_dir: Path) -> list[dict]:
-    """
-    Pairs each image in images_dir with its matching JSON annotation.
-    Returns: [{"image": Path, "fields": [...]}, ...]
-    Skips images with no matching annotation.
-    """
-    samples = []
-    for img_path in sorted(Path(images_dir).iterdir()):
-        if img_path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        ann_path = Path(annotations_dir) / (img_path.stem + ".json")
-        if not ann_path.exists():
-            continue
-        with open(ann_path) as f:
-            annotation = json.load(f)
-        samples.append({"image": img_path, "fields": annotation["fields"]})
-    return samples
+def load_samples(split_json: Path) -> list[dict]:
+    split_json = Path(split_json)
+    base = split_json.parent
+    with open(split_json) as f:
+        records = json.load(f)
+    return [{"image": base / r["image"], "fields": r["fields"]} for r in records]
 
 
 class DonutDataset(Dataset):
@@ -139,7 +106,7 @@ class DonutDataset(Dataset):
     Each item returns:
         pixel_values  (3, H, W) float tensor
         labels        (max_length,) int64 tensor, padding replaced with -100
-        target_text   str — the raw label string, useful for notebook inspection
+        target_text    the raw label string, useful for notebook inspection
     """
 
     def __init__(

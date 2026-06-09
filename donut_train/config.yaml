@@ -1,0 +1,18 @@
+# Token vocabulary
+TASK_TOKEN:  "<s_donut>"
+
+# Legacy symmetric format: <field> value <field>
+FIELD_TOKENS :
+  - "<destinataire>"
+  - "<E-mail>"
+  - "<cpf_cnpj_prestador>"
+  - "<cpf_cnpj_tomador>"
+  - "<data_emissao>"
+  - "<numero_da_nota>"
+  - "<servico_prestado>"
+  - "<valor_da_nota>"
+
+IMAGE_EXTENSIONS :  
+  - ".jpg"
+  - ".jpeg"
+  - ".png"

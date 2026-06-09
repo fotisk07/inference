@@ -11,4 +11,10 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "mlflow>=3.13.0",
     "pydantic-settings>=2.0",
+    "pyyaml>=6.0.3",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
 ]

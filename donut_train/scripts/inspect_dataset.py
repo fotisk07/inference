@@ -25,8 +25,7 @@ from PIL import Image
 
 _HERE = Path(__file__).parent
 MODEL_NAME = "naver-clova-ix/donut-base"
-IMAGES_DIR = str(_HERE / "../test_data/images/train")
-ANNOTATIONS_DIR = str(_HERE / "../test_data/new_cardxie_annotations/train")
+DATA_JSON = str(_HERE / "../test_data/train.json")
 MAX_LENGTH = 128
 
 
@@ -82,8 +81,11 @@ def _check_single_piece(processor, token2json_format: bool) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect and validate a DonutDataset")
     parser.add_argument("--model", default=MODEL_NAME)
-    parser.add_argument("--images_dir", default=IMAGES_DIR)
-    parser.add_argument("--annotations_dir", default=ANNOTATIONS_DIR)
+    parser.add_argument(
+        "--data_json",
+        default=DATA_JSON,
+        help="Aggregate JSON file produced by migrate_to_aggregate_json.py",
+    )
     parser.add_argument("--max_length", type=int, default=MAX_LENGTH)
     parser.add_argument(
         "--n", type=int, default=5, help="Number of samples to show details for"
@@ -100,8 +102,7 @@ def main() -> None:
 
     print(f"\n{'═' * 64}")
     print("  Donut dataset inspection")
-    print(f"  images     : {args.images_dir}")
-    print(f"  annotations: {args.annotations_dir}")
+    print(f"  data_json  : {args.data_json}")
     print(f"  max_length : {args.max_length}")
     print(
         f"  format     : {'token2json (<s_field>…</s_field>)' if args.token2json_format else 'legacy (<field> … <field>)'}"
@@ -110,10 +111,10 @@ def main() -> None:
 
     print("\nLoading processor (this may download weights the first time)...")
     processor = build_processor(args.model, args.token2json_format)
-    samples = load_samples(Path(args.images_dir), Path(args.annotations_dir))
+    samples = load_samples(Path(args.data_json))
 
     if not samples:
-        print("ERROR: no samples found — check images_dir and annotations_dir")
+        print("ERROR: no samples found — check data_json path")
         return
 
     print(f"Found {len(samples)} samples\n")

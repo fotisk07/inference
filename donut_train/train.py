@@ -1,16 +1,4 @@
-"""
-Donut fine-tuning training script.
-
-Run with defaults:
-    cd donut_train && uv run python train.py
-
-Override any field from the CLI:
-    uv run python train.py --lr 1e-4 --batch_size 8 --mlflow_experiment my-exp
-    uv run python train.py --image_size '[640,480]'   # tuples as JSON
-
-To add gradient clipping, early stopping, etc., look for
-the "# extend:" comments — those are the exact spots to add them.
-"""
+"""Donut fine-tuning training script."""
 
 import random
 import time
@@ -31,8 +19,7 @@ class Config(BaseSettings):
 
     model_name: str = "naver-clova-ix/donut-base"
 
-    images_dir: str = "../test_data/images/train"
-    annotations_dir: str = "../test_data/new_cardxie_annotations/train"
+    data_json: str = "../test_data/train.json"
     val_split: float = 0.2
 
     # (height, width) — donut-base pretrain default; reduce to save GPU memory
@@ -112,9 +99,7 @@ def train(config: Config) -> None:
         "height": config.image_size[0],
         "width": config.image_size[1],
     }
-    samples = load_samples(Path(config.images_dir), Path(config.annotations_dir))
-    if not samples:
-        raise ValueError(f"No samples found in {config.images_dir}")
+    samples = load_samples(Path(config.data_json))
 
     random.shuffle(samples)
     split = max(1, int(len(samples) * (1 - config.val_split)))
@@ -177,7 +162,7 @@ def train(config: Config) -> None:
 
             loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
-            # extend: torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()

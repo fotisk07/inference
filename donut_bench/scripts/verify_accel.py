@@ -59,7 +59,9 @@ def main():
     apply_patch(model, dev, cfg.no_patch)
 
     print(f"Loading {cfg.n_images} images from {cfg.dataset}...")
-    pool = load_pool(cfg.n_images, cfg.dataset, cfg.dataset_split, cfg.image_column, None)
+    pool = load_pool(
+        cfg.n_images, cfg.dataset, cfg.dataset_split, cfg.image_column, None
+    )
     images = sample_batch(pool, cfg.n_images)
 
     pixel_values = (
@@ -76,8 +78,9 @@ def main():
 
     print(f"Applying backend: {cfg.backend}...")
     # Apply only the attention patches (mask patch already applied above).
-    from inference.accel.fa2 import activate_decoder_fa2
-    from inference.accel.sdpa import activate_decoder_sdpa, patch_swin_sdpa
+    from donut.accel.decoder_fa import apply_decoder_fa as activate_decoder_fa2
+    from donut.accel.decoder_sdpa import apply_decoder_sdpa as activate_decoder_sdpa
+    from donut.accel.encoder_sdpa import apply_encoder_sdpa as patch_swin_sdpa
 
     if cfg.backend == "sdpa":
         patch_swin_sdpa(model)
@@ -108,7 +111,9 @@ def main():
     )
     if max_ae > 1.0:
         n_outliers = (abs_err > 1.0).sum().item()
-        print(f"          ({n_outliers} element(s) > 1.0 — expected from SDPA backend numerics)")
+        print(
+            f"          ({n_outliers} element(s) > 1.0 — expected from SDPA backend numerics)"
+        )
 
     # Decoder exact-match check
     decoded_eager = processor.batch_decode(seqs_eager, skip_special_tokens=True)

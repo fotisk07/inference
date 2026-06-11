@@ -14,12 +14,28 @@ fa2 = ["flash-attn-4>=4.0.0b15"]
 
 [dependency-groups]
 dev = [
+    "numpy>=2.0",
     "pytest>=8.0",
     "ruff>=0.15.13",
+]
+analysis = [
+    "ipykernel>=7.0",
+    "jupyter>=1.1",
+    "matplotlib>=3.10",
+    "pandas>=2.3",
 ]
 
 [tool.uv]
 package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: torch.compile smoke tests (deselected by default)",
+    "cuda: requires CUDA",
+    "fa: requires CUDA + flash-attn",
+]
 
 [build-system]
 requires = ["hatchling"]

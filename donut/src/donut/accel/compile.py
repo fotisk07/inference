@@ -1,8 +1,16 @@
-"""torch.compile acceleration for Donut encoder and decoder."""
+"""torch.compile acceleration for Donut encoder and decoder.
+
+Compile must always be the last optimization applied (and the first reverted):
+it wraps model.encoder/model.decoder in OptimizedModule, and patching the
+wrapped modules afterwards would mutate _orig_mod under a stale graph. The
+preset ordering in donut.accel guarantees this.
+"""
 
 import torch
 
-from donut.accel.registry import Optimization, register
+
+def _is_compiled(module) -> bool:
+    return hasattr(module, "_orig_mod")
 
 
 def apply_compile(model, *, encoder: bool = True, decoder: bool = True) -> None:
@@ -10,55 +18,30 @@ def apply_compile(model, *, encoder: bool = True, decoder: bool = True) -> None:
 
     dynamic=True handles variable sequence lengths in the decoder without
     recompilation. First-call compilation adds latency; subsequent calls
-    use the compiled graph. Safe to call multiple times — re-compilation
-    is skipped if the module is already compiled.
+    use the compiled graph. Idempotent.
     """
-    if encoder and not getattr(model.encoder, "_compiled", False):
+    if encoder and not _is_compiled(model.encoder):
         model.encoder = torch.compile(model.encoder, dynamic=True)
-        model.encoder._compiled = True
-    if decoder and not getattr(model.decoder, "_compiled", False):
+    if decoder and not _is_compiled(model.decoder):
         model.decoder = torch.compile(model.decoder, dynamic=True)
-        model.decoder._compiled = True
 
 
 def revert_compile(model, *, encoder: bool = True, decoder: bool = True) -> None:
     """Unwrap torch.compile, restoring the original (eager) submodules.
 
-    torch.compile returns an OptimizedModule wrapping the original at ``_orig_mod``;
-    restoring that reference discards the compiled graph cleanly.
+    torch.compile returns an OptimizedModule wrapping the original at _orig_mod;
+    restoring that reference discards the compiled graph cleanly. No-op if not
+    applied.
     """
-    if encoder and getattr(model.encoder, "_compiled", False):
+    if encoder and _is_compiled(model.encoder):
         model.encoder = model.encoder._orig_mod
-    if decoder and getattr(model.decoder, "_compiled", False):
+    if decoder and _is_compiled(model.decoder):
         model.decoder = model.decoder._orig_mod
 
 
-@register
-class Compile(Optimization):
-    """Wrap encoder and/or decoder with torch.compile(dynamic=True).
-
-    Layered on top of an attention backend. Construct with ``encoder``/``decoder``
-    flags to compile only one side.
-    """
-
-    name = "compile"
-
-    def __init__(self, *, encoder: bool = True, decoder: bool = True) -> None:
-        self.encoder = encoder
-        self.decoder = decoder
-
-    def apply(self, model) -> None:
-        apply_compile(model, encoder=self.encoder, decoder=self.decoder)
-
-    def revert(self, model) -> None:
-        revert_compile(model, encoder=self.encoder, decoder=self.decoder)
-
-    def check_structural(self, model) -> None:
-        if self.encoder:
-            assert getattr(model.encoder, "_compiled", False), (
-                "Encoder has not been compiled — apply Compile first"
-            )
-        if self.decoder:
-            assert getattr(model.decoder, "_compiled", False), (
-                "Decoder has not been compiled — apply Compile first"
-            )
+def check_compile(model, *, encoder: bool = True, decoder: bool = True) -> None:
+    """Assert encoder/decoder are torch.compile-wrapped."""
+    if encoder:
+        assert _is_compiled(model.encoder), "Encoder is not torch.compile-wrapped"
+    if decoder:
+        assert _is_compiled(model.decoder), "Decoder is not torch.compile-wrapped"

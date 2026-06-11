@@ -1,4 +1,4 @@
-"""Cyclic-shift attention mask caching for DonutSwinSelfAttention.
+"""Cyclic-shift attention mask caching for DonutSwin.
 
 DonutSwin recomputes the cyclic-shift window mask on every forward pass, which
 is wasteful — the mask depends only on (height, width, dtype) and never changes
@@ -10,13 +10,14 @@ automatically based on the model device:
   - CPU / GPU-transfer: compute in float32 on CPU, transfer once to device.
   - GPU-direct: compute entirely on GPU (no host compute, no H2D transfer).
     ~75x faster cold-start on CUDA; meaningless on CPU.
+
+The cached function keeps the (height, width, dtype, device) signature that
+transformers v5 uses when calling get_attn_mask.
 """
 
 import types
 
 import torch
-
-from donut.accel.registry import Optimization, register
 
 
 def _make_cpu_variant(device):
@@ -77,7 +78,7 @@ def apply_mask_cache(model) -> None:
 
     Replaces the default per-call mask recomputation with a cached version keyed
     by (height, width, dtype). Auto-selects the GPU-direct variant on CUDA and
-    the CPU-float32 variant elsewhere. Safe to call multiple times.
+    the CPU-float32 variant elsewhere. Idempotent.
     """
     device = next(model.encoder.parameters()).device
     make_fn = _make_gpu_variant if device.type == "cuda" else _make_cpu_variant
@@ -95,7 +96,7 @@ def revert_mask_cache(model) -> None:
     """Undo apply_mask_cache: restore the class get_attn_mask and drop caches.
 
     Deleting the per-instance attributes makes each block fall back to the
-    original DonutSwinSelfAttention.get_attn_mask defined on the class.
+    original get_attn_mask defined on the class. No-op if not applied.
     """
     for stage in model.encoder.encoder.layers:
         for block in stage.blocks:
@@ -108,28 +109,13 @@ def revert_mask_cache(model) -> None:
                 del block._mask_cache
 
 
-@register
-class MaskCache(Optimization):
-    """Cache the cyclic-shift Swin attention mask by (height, width, dtype).
-
-    Universally beneficial and a prerequisite for the SDPA encoder patch, which
-    consumes the cached additive bias. Always first in a preset.
-    """
-
-    name = "mask_cache"
-
-    def apply(self, model) -> None:
-        apply_mask_cache(model)
-
-    def revert(self, model) -> None:
-        revert_mask_cache(model)
-
-    def check_structural(self, model) -> None:
-        for i, stage in enumerate(model.encoder.encoder.layers):
-            for j, block in enumerate(stage.blocks):
-                if block.shift_size == 0:
-                    continue
-                assert getattr(block, "_mask_cache_applied", False), (
-                    f"Stage {i} block {j} (shift_size={block.shift_size}) "
-                    "does not have mask caching applied — apply MaskCache first"
-                )
+def check_mask_cache(model) -> None:
+    """Assert mask caching is active on every shifted Swin block."""
+    for i, stage in enumerate(model.encoder.encoder.layers):
+        for j, block in enumerate(stage.blocks):
+            if block.shift_size == 0:
+                continue
+            assert getattr(block, "_mask_cache_applied", False), (
+                f"Stage {i} block {j} (shift_size={block.shift_size}) "
+                "does not have mask caching applied — call apply_mask_cache first"
+            )

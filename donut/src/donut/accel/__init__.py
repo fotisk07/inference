@@ -1,93 +1,100 @@
-from enum import Enum
+"""Acceleration presets for the Donut model.
 
-from donut.accel.compile import Compile
-from donut.accel.fa2 import DecoderFA2, activate_decoder_fa2
-from donut.accel.mask_cache import MaskCache, apply_mask_cache
-from donut.accel.registry import (
-    REGISTRY,
-    Optimization,
-    applied_optimizations,
-    apply_optimizations,
-    check_optimizations,
-    register,
-    revert_optimizations,
+Each optimization is a module exposing three plain functions:
+
+    apply_x(model)   -- apply the transform in-place (idempotent via guard attrs)
+    revert_x(model)  -- undo it (no-op if not applied)
+    check_x(model)   -- assert it is active (raises AssertionError with detail)
+
+A preset is an ordered list of (apply, revert, check) steps. apply_accel runs
+them in order and records the revert callables on the model so revert_accel can
+undo everything in reverse order. To add a new optimization, write a module
+with the three functions and add its step to PRESETS.
+"""
+
+from collections.abc import Callable
+
+from donut.accel.compile import apply_compile, check_compile, revert_compile
+from donut.accel.decoder_fa import (
+    apply_decoder_fa,
+    check_decoder_fa,
+    fa_available,
+    revert_decoder_fa,
 )
-from donut.accel.sdpa import (
-    DecoderSDPA,
-    EncoderSDPA,
-    activate_decoder_sdpa,
-    patch_swin_sdpa,
+from donut.accel.decoder_sdpa import (
+    apply_decoder_sdpa,
+    check_decoder_sdpa,
+    revert_decoder_sdpa,
 )
+from donut.accel.encoder_sdpa import (
+    apply_encoder_sdpa,
+    check_encoder_sdpa,
+    revert_encoder_sdpa,
+)
+from donut.accel.mask_cache import apply_mask_cache, check_mask_cache, revert_mask_cache
+
+Step = tuple[Callable, Callable, Callable]  # (apply, revert, check)
+
+MASK_CACHE: Step = (apply_mask_cache, revert_mask_cache, check_mask_cache)
+ENCODER_SDPA: Step = (apply_encoder_sdpa, revert_encoder_sdpa, check_encoder_sdpa)
+DECODER_SDPA: Step = (apply_decoder_sdpa, revert_decoder_sdpa, check_decoder_sdpa)
+DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
+COMPILE: Step = (apply_compile, revert_compile, check_compile)
+
+# Mask caching is always first (universally beneficial; the SDPA encoder patch
+# consumes its cached bias). Compile, when requested, is appended last.
+PRESETS: dict[str, list[Step]] = {
+    "eager": [MASK_CACHE],
+    "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
+    "fa": [MASK_CACHE, ENCODER_SDPA, DECODER_FA],
+}
+
+_ALIASES = {"fa2": "fa"}
 
 
-class Backend(str, Enum):
-    EAGER = "eager"
-    SDPA = "sdpa"
-    FA2 = "fa2"
+def _steps(backend: str, compile: bool) -> list[Step]:
+    backend = _ALIASES.get(str(backend), str(backend))
+    if backend not in PRESETS:
+        raise ValueError(f"Unknown backend {backend!r}; choose from {sorted(PRESETS)}")
+    return list(PRESETS[backend]) + ([COMPILE] if compile else [])
 
 
-def preset(backend: "Backend | str") -> list[Optimization]:
-    """Return the ordered optimization list for a backend preset.
+def apply_accel(model, backend: str = "sdpa", *, compile: bool = False) -> None:
+    """Apply a backend preset in-place, recording reverts on the model.
 
-    MaskCache is always first (universally beneficial; required by EncoderSDPA).
-    The attention backend is layered on top.
+    Each apply is idempotent, so re-applying a backend (or layering presets
+    that share steps) is safe. Undo everything with revert_accel.
     """
-    backend = Backend(backend)
-    if backend is Backend.EAGER:
-        return [MaskCache()]
-    if backend is Backend.SDPA:
-        return [MaskCache(), EncoderSDPA(), DecoderSDPA()]
-    if backend is Backend.FA2:
-        return [MaskCache(), EncoderSDPA(), DecoderFA2()]
-    raise ValueError(f"Unknown backend: {backend!r}")
-
-
-def apply_accel(
-    model,
-    backend: "Backend | str",
-    *,
-    compile: bool = False,
-    optimizations: "list[Optimization] | None" = None,
-) -> None:
-    """Apply an ordered list of optimizations in-place and record them on the model.
-
-    By default the list comes from the ``backend`` preset (EAGER/SDPA/FA2). Pass
-    ``optimizations`` to supply an explicit composed list instead (``backend`` is
-    then ignored for selection). ``compile=True`` appends a Compile step.
-
-    Applied optimizations are tracked so they can be reverted with
-    :func:`revert_accel` and verified with the structural checks — no need to
-    order backends least->most aggressive or reload the model between configs.
-    """
-    opts = list(optimizations) if optimizations is not None else preset(backend)
-    if compile:
-        opts.append(Compile())
-    apply_optimizations(model, opts)
+    reverts = getattr(model, "_accel_reverts", [])
+    for apply_fn, revert_fn, _ in _steps(backend, compile):
+        apply_fn(model)
+        reverts.append(revert_fn)
+    model._accel_reverts = reverts
 
 
 def revert_accel(model) -> None:
     """Revert every applied optimization, returning the model to eager state."""
-    revert_optimizations(model)
+    for revert_fn in reversed(getattr(model, "_accel_reverts", [])):
+        revert_fn(model)
+    model._accel_reverts = []
+
+
+def check_accel(model, backend: str = "sdpa", *, compile: bool = False) -> None:
+    """Assert every step of a backend preset is active. Raises AssertionError."""
+    for _, _, check_fn in _steps(backend, compile):
+        check_fn(model)
 
 
 __all__ = [
-    "Backend",
-    "Optimization",
-    "REGISTRY",
-    "register",
-    "preset",
+    "COMPILE",
+    "DECODER_FA",
+    "DECODER_SDPA",
+    "ENCODER_SDPA",
+    "MASK_CACHE",
+    "PRESETS",
+    "Step",
     "apply_accel",
+    "check_accel",
+    "fa_available",
     "revert_accel",
-    "applied_optimizations",
-    "check_optimizations",
-    "MaskCache",
-    "EncoderSDPA",
-    "DecoderSDPA",
-    "DecoderFA2",
-    "Compile",
-    # legacy function API (kept for back-compat)
-    "apply_mask_cache",
-    "patch_swin_sdpa",
-    "activate_decoder_sdpa",
-    "activate_decoder_fa2",
 ]

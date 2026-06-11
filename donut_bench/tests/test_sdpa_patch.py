@@ -31,8 +31,11 @@ import torch
 import torch.nn.functional as F
 from transformers.models.donut.modeling_donut_swin import DonutSwinSelfAttention
 
-from inference.accel.fa2 import activate_decoder_fa2
-from inference.accel.sdpa import _sdpa_self_forward, activate_decoder_sdpa, patch_swin_sdpa
+from donut.accel.decoder_fa import apply_decoder_fa as activate_decoder_fa2
+from donut.accel.decoder_fa import fa_available
+from donut.accel.decoder_sdpa import apply_decoder_sdpa as activate_decoder_sdpa
+from donut.accel.encoder_sdpa import _sdpa_self_forward
+from donut.accel.encoder_sdpa import apply_encoder_sdpa as patch_swin_sdpa
 
 
 # ============================================================================
@@ -719,14 +722,21 @@ class TestDecoderConfigActivation:
         activate_decoder_sdpa(mock_decoder_model)
         assert mock_decoder_model.decoder.config._attn_implementation == "sdpa"
 
+    @pytest.mark.skipif(not fa_available(), reason="requires CUDA + flash-attn")
     def test_activate_decoder_fa2_sets_config(self, mock_decoder_model):
         """
-        activate_decoder_fa2 must set decoder.config._attn_implementation = 'flash_attention_2'.
-        Failure means FA2 dispatch is never triggered in MBart.
+        activate_decoder_fa2 must set decoder.config._attn_implementation to a
+        flash-attention impl ('flash_attention_2' or 'flash_attention_4',
+        depending on the installed flash-attn package). Failure means flash
+        attention dispatch is never triggered in MBart.
         """
         activate_decoder_fa2(mock_decoder_model)
-        assert mock_decoder_model.decoder.config._attn_implementation == "flash_attention_2"
+        assert mock_decoder_model.decoder.config._attn_implementation in (
+            "flash_attention_2",
+            "flash_attention_4",
+        )
 
+    @pytest.mark.skipif(not fa_available(), reason="requires CUDA + flash-attn")
     def test_sdpa_and_fa2_set_different_values(self, mock_decoder_model):
         """SDPA and FA2 activations must not be silently identical."""
         from types import SimpleNamespace

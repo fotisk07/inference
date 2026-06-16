@@ -12,9 +12,13 @@ dependencies = [
     "mlflow>=3.13.0",
     "pydantic-settings>=2.0",
     "pyyaml>=6.0.3",
+    "donut",
 ]
 
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
 ]
+
+[tool.uv.sources]
+donut = { path = "../donut", editable = true }

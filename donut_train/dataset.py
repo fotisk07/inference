@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -6,31 +7,39 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import DonutProcessor
 
-_CONFIG_PATH = Path(__file__).parent / "config.yaml"
-with open(_CONFIG_PATH) as _f:
-    _cfg = yaml.safe_load(_f)
+# ── Vocabulary ────────────────────────────────────────────────────────────────
 
-TASK_TOKEN: str = _cfg["TASK_TOKEN"]
-FIELD_TOKENS: list[str] = _cfg["FIELD_TOKENS"]
-ALL_SPECIAL_TOKENS: list[str] = [TASK_TOKEN] + FIELD_TOKENS
 
-# Derive token2json open/close pairs: "<E-mail>" → ("<s_E-mail>", "</s_E-mail>")
-FIELD_TOKENS_T2J: list[tuple[str, str]] = [
-    (f"<s_{tok[1:-1]}>", f"</s_{tok[1:-1]}>") for tok in FIELD_TOKENS
-]
-ALL_SPECIAL_TOKENS_T2J: list[str] = [TASK_TOKEN] + [
-    t for pair in FIELD_TOKENS_T2J for t in pair
-]
+def _load_vocab() -> tuple[str, list[str]]:
+    cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
+    return cfg["TASK_TOKEN"], cfg["FIELD_TOKENS"]
 
-IMAGE_EXTENSIONS: set[str] = set(_cfg["IMAGE_EXTENSIONS"])
+
+TASK_TOKEN, FIELD_TOKENS = _load_vocab()
+
+
+def _t2j_pairs() -> list[tuple[str, str]]:
+    """Return (open, close) token pairs for token2json format."""
+    return [(f"<s_{tok[1:-1]}>", f"</s_{tok[1:-1]}>") for tok in FIELD_TOKENS]
+
+
+# ── Processor ─────────────────────────────────────────────────────────────────
 
 
 def build_processor(model_name: str, token2json_format: bool = False) -> DonutProcessor:
     """Load DonutProcessor and register all task + field tokens."""
     processor = DonutProcessor.from_pretrained(model_name)
-    tokens = ALL_SPECIAL_TOKENS_T2J if token2json_format else ALL_SPECIAL_TOKENS
-    processor.tokenizer.add_special_tokens({"additional_special_tokens": tokens})
+    if token2json_format:
+        extra = [t for pair in _t2j_pairs() for t in pair]
+    else:
+        extra = list(FIELD_TOKENS)
+    processor.tokenizer.add_special_tokens(
+        {"additional_special_tokens": [TASK_TOKEN] + extra}
+    )
     return processor
+
+
+# ── Label encoding ────────────────────────────────────────────────────────────
 
 
 def format_label(
@@ -39,22 +48,19 @@ def format_label(
     token2json_format: bool = False,
 ) -> str:
     """
-    Converts annotation fields to a token-wrapped string.
+    Convert annotation fields to a token-wrapped string.
 
-    Derives the token name from the last segment of field_name (after '/'),
-    so it's robust to prefix typos in the annotation paths.
+    Derives the field name from the last segment of field_name (after '/'),
+    keeping only the first occurrence when duplicates appear.
 
-    Duplicate field_names keep only the first occurrence.
-
-    token2json_format=False (default):
+    token2json_format=False (default — legacy symmetric):
         present : "<E-mail> foo@bar.com <E-mail>"
         missing : "<E-mail><E-mail>"   (only when include_missing=True)
 
-    token2json_format=True — compatible with processor.token2json():
+    token2json_format=True (XML-like, parseable with processor.token2json()):
         present : "<s_E-mail>foo@bar.com</s_E-mail>"
         missing : "<s_E-mail></s_E-mail>"   (only when include_missing=True)
     """
-    # deduplicate: keep first occurrence of each field_name
     seen: set[str] = set()
     deduped = []
     for f in fields:
@@ -69,7 +75,7 @@ def format_label(
 
     parts = []
     if token2json_format:
-        for open_tok, close_tok in FIELD_TOKENS_T2J:
+        for open_tok, close_tok in _t2j_pairs():
             leaf = open_tok[3:-1]  # "<s_E-mail>" → "E-mail"
             value = values.get(leaf, "")
             if value:
@@ -88,12 +94,79 @@ def format_label(
         return " ".join(parts)
 
 
+# ── Label decoding ────────────────────────────────────────────────────────────
+
+
+def _flatten(obj, prefix: str = "") -> dict[str, str]:
+    """Recursively flatten a nested dict returned by processor.token2json()."""
+    out: dict[str, str] = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(_flatten(v, k))
+    elif isinstance(obj, list):
+        for item in obj:
+            out.update(_flatten(item, prefix))
+    else:
+        if prefix:
+            out[prefix] = str(obj) if obj is not None else ""
+    return out
+
+
+def _parse_token2json(decoded: str, processor: DonutProcessor) -> dict[str, str]:
+    """
+    Parse token2json-format output into a {field: value} dict.
+
+    The model produces something like:
+        <s_donut><s_E-mail>a@b.com</s_E-mail><s_valor_da_nota>100</s_valor_da_nota>...
+
+    We strip the task token then delegate to processor.token2json().
+    """
+    text = re.sub(re.escape(TASK_TOKEN), "", decoded, count=1)
+    try:
+        parsed = processor.token2json(text)
+    except Exception:
+        parsed = {}
+    return _flatten(parsed)
+
+
+def _parse_legacy(decoded: str) -> dict[str, str]:
+    """
+    Parse legacy symmetric-token format into a {field: value} dict.
+
+    The model produces something like:
+        <s_donut><E-mail> a@b.com <E-mail><valor_da_nota> 100 <valor_da_nota>
+    """
+    result: dict[str, str] = {}
+    for token in FIELD_TOKENS:
+        leaf = token[1:-1]  # "<E-mail>" → "E-mail"
+        pattern = re.escape(token) + r"\s*(.*?)\s*" + re.escape(token)
+        match = re.search(pattern, decoded, re.DOTALL)
+        if match:
+            result[leaf] = match.group(1).strip()
+    return result
+
+
+def parse_prediction(
+    decoded: str, token2json_format: bool, processor: DonutProcessor
+) -> dict[str, str]:
+    """Decode a raw model output string into a {field_name: value} dict."""
+    if token2json_format:
+        return _parse_token2json(decoded, processor)
+    return _parse_legacy(decoded)
+
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+
+
 def load_samples(split_json: Path) -> list[dict]:
     split_json = Path(split_json)
     base = split_json.parent
     with open(split_json) as f:
         records = json.load(f)
     return [{"image": base / r["image"], "fields": r["fields"]} for r in records]
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
 
 
 class DonutDataset(Dataset):
@@ -106,7 +179,7 @@ class DonutDataset(Dataset):
     Each item returns:
         pixel_values  (3, H, W) float tensor
         labels        (max_length,) int64 tensor, padding replaced with -100
-        target_text    the raw label string, useful for notebook inspection
+        target_text   the raw label string, useful for notebook inspection
     """
 
     def __init__(

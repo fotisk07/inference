@@ -7,10 +7,11 @@ from pathlib import Path
 import mlflow
 import torch
 from dataset import DonutDataset, build_processor, load_samples
+from donut import load_model
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader
-from transformers import VisionEncoderDecoderModel, get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -46,15 +47,31 @@ class Config(BaseSettings):
     # When False (default): legacy symmetric format <field> value <field>.
     token2json_format: bool = False
 
+    # Acceleration backend passed to donut.load_model(). "eager" disables all
+    # patches except mask caching; "sdpa" adds PyTorch SDPA; "fa" requires CUDA + flash-attn.
+    backend: str = "sdpa"
+
+    # When True: use the tiny random model from donut.synthetic on a small data
+    # subset. Runs on CPU in seconds with no HF downloads. Zero exit = pipeline OK.
+    smoke: bool = False
+    smoke_n_samples: int = 4
+    smoke_epochs: int = 5
+
     device: str = Field(
         default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
     )
 
 
 # ── Model setup ───────────────────────────────────────────────────────────────
-def build_model(processor, model_name: str) -> VisionEncoderDecoderModel:
-    """Load pretrained model and configure it for fine-tuning."""
-    model = VisionEncoderDecoderModel.from_pretrained(model_name)
+def build_model(cfg: "Config", processor):
+    if cfg.smoke:
+        from donut.synthetic import make_tiny_model
+
+        model = make_tiny_model()
+    else:
+        model, _ = load_model(
+            model_id=cfg.model_name, device=cfg.device, backend=cfg.backend
+        )
     model.decoder.resize_token_embeddings(len(processor.tokenizer))
     # naver-standard: pad as decoder start, task token lives in labels
     model.config.pad_token_id = processor.tokenizer.pad_token_id
@@ -64,9 +81,7 @@ def build_model(processor, model_name: str) -> VisionEncoderDecoderModel:
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(
-    model: VisionEncoderDecoderModel, loader: DataLoader, device: str
-) -> float:
+def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> float:
     model.eval()
     total_loss = 0.0
     for batch in loader:
@@ -78,8 +93,21 @@ def evaluate(
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 def train(config: Config) -> None:
+    if config.smoke:
+        config = config.model_copy(
+            update=dict(
+                device="cpu",
+                image_size=(64, 64),
+                batch_size=1,
+                num_workers=0,
+                warmup_steps=0,
+                max_epochs=config.smoke_epochs,
+                mlflow_experiment=None,
+            )
+        )
+
     print(f"\n{'=' * 60}")
-    print("  Donut fine-tuning")
+    print("  Donut fine-tuning" + ("  [SMOKE TEST]" if config.smoke else ""))
     print(
         f"  device={config.device}  lr={config.lr}  batch={config.batch_size}"
         f"  epochs={config.max_epochs}  image={config.image_size[0]}×{config.image_size[1]}"
@@ -102,6 +130,8 @@ def train(config: Config) -> None:
     samples = load_samples(Path(config.data_json))
 
     random.shuffle(samples)
+    if config.smoke:
+        samples = samples[: config.smoke_n_samples]
     split = max(1, int(len(samples) * (1 - config.val_split)))
     train_samples, val_samples = samples[:split], samples[split:]
     print(f"Dataset: {len(train_samples)} train, {len(val_samples)} val")
@@ -133,8 +163,11 @@ def train(config: Config) -> None:
     )
 
     # --- model ---
-    print(f"Loading model from {config.model_name} ...")
-    model = build_model(processor, config.model_name).to(config.device)
+    if config.smoke:
+        print("Loading tiny model (donut.synthetic, CPU, no downloads) ...")
+    else:
+        print(f"Loading model from {config.model_name} (backend={config.backend}) ...")
+    model = build_model(config, processor)
 
     # --- optimizer + scheduler ---
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
@@ -197,12 +230,21 @@ def train(config: Config) -> None:
             )
 
         # --- checkpoint ---
-        if (epoch + 1) % config.save_every_n_epochs == 0:
+        if not config.smoke and (epoch + 1) % config.save_every_n_epochs == 0:
             ckpt_path = (
                 Path(config.output_dir) / f"epoch_{epoch + 1:03d}_val{val_loss:.4f}.pt"
             )
             torch.save(
-                {"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss},
+                {
+                    "model": model.state_dict(),
+                    "epoch": epoch,
+                    "val_loss": val_loss,
+                    # metadata needed by predict.py to reconstruct the model
+                    "model_name": config.model_name,
+                    "token2json_format": config.token2json_format,
+                    "image_size": config.image_size,
+                    "max_length": config.max_length,
+                },
                 ckpt_path,
             )
             print(f"           saved → {ckpt_path}")

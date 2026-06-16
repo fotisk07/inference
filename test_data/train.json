@@ -1,0 +1,95 @@
+[
+  {
+    "image": "images/train/fake_01.jpg",
+    "fields": [
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+        "annotator_text": "alice@example.com"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/data_emissao",
+        "annotator_text": "15/03/2024"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+        "annotator_text": "1250.00"
+      }
+    ]
+  },
+  {
+    "image": "images/train/fake_02.jpg",
+    "fields": [
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+        "annotator_text": "Bob Silva"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+        "annotator_text": "bob@company.br"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/cpf_cnpj_prestador",
+        "annotator_text": "123.456.789-00"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+        "annotator_text": "3400.50"
+      }
+    ]
+  },
+  {
+    "image": "images/train/fake_03.jpg",
+    "fields": [
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+        "annotator_text": "Carlos Ltd"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/numero_da_nota",
+        "annotator_text": "NF-20240399"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/servico_prestado",
+        "annotator_text": "Consultoria"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/valor_da_nota",
+        "annotator_text": "750.00"
+      }
+    ]
+  },
+  {
+    "image": "images/train/fake_04.jpg",
+    "fields": [
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+        "annotator_text": "diana@freelance.io"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/cpf_cnpj_tomador",
+        "annotator_text": "98.765.432/0001-10"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/data_emissao",
+        "annotator_text": "01/06/2024"
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/numero_da_nota",
+        "annotator_text": "NF-20240601"
+      }
+    ]
+  },
+  {
+    "image": "images/train/test_data.jpg",
+    "fields": [
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/destinataire",
+        "annotator_text": ""
+      },
+      {
+        "field_name": "BR/COMMISSION_PAYEMENT/E-mail",
+        "annotator_text": "exemple@email.fr"
+      }
+    ]
+  }
+]

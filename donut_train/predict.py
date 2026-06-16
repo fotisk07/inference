@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from dataset import TASK_TOKEN, build_processor, load_samples, parse_prediction
+from tqdm import tqdm
 from donut import load_model
 from metrics import summarize
 from PIL import Image
@@ -88,7 +89,7 @@ def predict(cfg: Config) -> None:
     results = []  # for metrics.py
     output_records = []  # for output JSON
 
-    for i, sample in enumerate(samples):
+    for i, sample in enumerate(tqdm(samples, desc="predicting")):
         image = Image.open(sample["image"]).convert("RGB")
         pixel_values = processor(image, return_tensors="pt").pixel_values.to(
             device=cfg.device, dtype=model_dtype
@@ -125,9 +126,6 @@ def predict(cfg: Config) -> None:
                 ],
             }
         )
-
-        if (i + 1) % 10 == 0 or (i + 1) == len(samples):
-            print(f"  {i + 1}/{len(samples)}")
 
     # Metrics — only when GT is present
     if any(r["gt"] for r in results):

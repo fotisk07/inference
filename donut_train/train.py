@@ -6,6 +6,7 @@ from pathlib import Path
 
 import mlflow
 import torch
+from tqdm import tqdm
 from dataset import DonutDataset, build_processor, load_samples
 from donut import load_model
 from pydantic import Field
@@ -205,7 +206,12 @@ def train(config: Config) -> None:
         docs_trained = 0
         epoch_start = time.time()
 
-        for batch in train_loader:
+        batch_bar = tqdm(
+            train_loader,
+            desc=f"epoch {epoch + 1}/{config.max_epochs}",
+            leave=False,
+        )
+        for batch in batch_bar:
             pixel_values = batch["pixel_values"].to(
                 device=config.device, dtype=model_dtype
             )
@@ -221,6 +227,7 @@ def train(config: Config) -> None:
             epoch_loss += loss.item()
             docs_trained += pixel_values.shape[0]
             global_step += 1
+            batch_bar.set_postfix(loss=f"{loss.item():.4f}")
             if config.mlflow_experiment:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
 

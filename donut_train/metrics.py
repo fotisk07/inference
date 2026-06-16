@@ -12,45 +12,51 @@ The central data structure is a list of result dicts, one per document:
         ...
     ]
 
-"gt" may be empty ({}) if you're running inference without labels — metric functions
-that require ground truth will return None or skip those documents gracefully.
+"gt" may be empty ({}) if you're running inference without labels — metric
+functions that require ground truth will skip those documents gracefully.
 
-── Terminology ──────────────────────────────────────────────────────────────────
-For each (document, field) pair we assign one of four labels:
+── Classification ───────────────────────────────────────────────────────────────
+For each (document, field) pair in the vocabulary we assign one of four labels:
 
-  TP (True Positive)           field in GT  ∧  field in pred  ∧  values match
-  FP_WRONG (False Positive)    field in GT  ∧  field in pred  ∧  values differ
-  FP_HALL  (Hallucinated FP)   field NOT in GT  ∧  field in pred
-  FN (False Negative)          field in GT  ∧  field NOT in pred
+  TP  (True Positive)   GT has value  ∧  model predicted  ∧  value is correct
+  FP  (False Positive)  GT has NO value  ∧  model predicted something
+                        → "predicting a box when there is nothing"
+  FN  (False Negative)  GT has value  ∧  model was wrong or silent
+                        → "bad / missing prediction" — covers both:
+                            (a) model predicted the wrong value
+                            (b) model predicted nothing at all
+  TN  (True Negative)   GT has NO value  ∧  model predicted nothing
+                        → "correctly abstaining"
 
-  TN (True Negative): field NOT in GT and model also skipped it.
-  TN is intentionally not tracked — there are many possible "missing" fields and
-  they carry no signal about extraction quality.
+The key insight: a wrong value is a FALSE NEGATIVE, not a false positive.
+The model failed to produce the correct answer — that is a negative outcome.
+FP is reserved for predicting a field that has nothing to predict.
 
-From these four primitives everything else is derived:
+From these four counts:
 
-  precision  = TP / (TP + FP_WRONG + FP_HALL)
-               "of what the model produced, how much was correct?"
-
-  recall     = TP / (TP + FN)
-               "of what existed in the document, how much did the model find?"
-
-  f1         = 2 * precision * recall / (precision + recall)
+  precision  = TP / (TP + FP)   — of what the model output, how much was right?
+  recall     = TP / (TP + FN)   — of what existed, how much did the model get?
+  f1         = 2·P·R / (P + R)
 
 ── Matching modes ───────────────────────────────────────────────────────────────
 All functions accept a `soft` keyword argument (default False).
 
-  soft=False (strict):  exact string comparison after no normalization
+  soft=False (strict):  exact string comparison
   soft=True  (lenient): compare normalize(pred) == normalize(gt)
-                        normalize() lowercases and strips leading/trailing whitespace
-
-To change what "lenient" means, edit the `normalize()` function — it is the
-single point of control for soft matching throughout this file.
+                        normalize() lowercases and strips leading/trailing
+                        whitespace — edit it to change what "lenient" means.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+
+from dataset import FIELD_TOKENS as _FIELD_TOKENS
+
+# Leaf field names derived from the token vocabulary, e.g. "<E-mail>" → "E-mail".
+# Used to enumerate every possible field for a document, which is required to
+# compute TN (fields absent in both GT and prediction).
+_VOCAB: list[str] = [tok[1:-1] for tok in _FIELD_TOKENS]
 
 
 # ── Normalization ─────────────────────────────────────────────────────────────
@@ -62,7 +68,7 @@ def normalize(value: str) -> str:
 
     Current rules: strip leading/trailing whitespace, then lowercase.
 
-    Add more rules here if needed, e.g.:
+    Add more rules here as needed, e.g.:
       - collapse internal whitespace:  " ".join(value.split())
       - strip punctuation:             re.sub(r"[^\w\s]", "", value)
       - remove accents:                unicodedata.normalize("NFD", value)...
@@ -84,56 +90,64 @@ def classify_fields(
     pred: dict[str, str], gt: dict[str, str], soft: bool = False
 ) -> dict:
     """
-    Classify every field for a single document into TP / FP_WRONG / FP_HALL / FN.
+    Classify every field in the vocabulary for a single document.
+
+    Iterates over every field the model knows about (_VOCAB) so that TN is
+    correctly counted (fields where both GT and prediction are empty/absent).
 
     Parameters
     ----------
-    pred : model predictions — {field_name: predicted_value}
-    gt   : ground truth      — {field_name: true_value}
-    soft : if True use normalize() for value comparison
+    pred : model predictions — {field_name: predicted_value}  (empty = absent)
+    gt   : ground truth      — {field_name: true_value}       (empty = absent)
+    soft : if True, use normalize() for value comparison
 
     Returns
     -------
-    dict with keys:
-        tp            : int  — count of true positives
-        fp_wrong      : int  — count of predicted-but-wrong fields
-        fp_hall       : int  — count of hallucinated (not-in-GT) fields
-        fn            : int  — count of missed GT fields
+    dict with integer counts and field-name lists for each class:
 
-        tp_fields     : list[str] — field names that were TPs
-        fp_wrong_fields  : list[str]
-        fp_hall_fields   : list[str]
-        fn_fields        : list[str]
+        tp      / tp_fields    — correct predictions
+        fp      / fp_fields    — predicted something when GT had nothing
+        fn      / fn_fields    — GT had value but model was wrong or silent
+        tn      / tn_fields    — GT had nothing and model correctly said nothing
     """
     tp_fields: list[str] = []
-    fp_wrong_fields: list[str] = []
-    fp_hall_fields: list[str] = []
+    fp_fields: list[str] = []
     fn_fields: list[str] = []
+    tn_fields: list[str] = []
 
-    # Walk model predictions
-    for field, pred_val in pred.items():
-        if field in gt:
-            if _match(pred_val, gt[field], soft):
+    for field in _VOCAB:
+        gt_val = gt.get(field, "")
+        pred_val = pred.get(field, "")
+
+        has_gt = bool(gt_val)
+        has_pred = bool(pred_val)
+
+        if has_gt and has_pred:
+            # Both present — TP if values match, FN if they don't
+            if _match(pred_val, gt_val, soft):
                 tp_fields.append(field)
             else:
-                fp_wrong_fields.append(field)
-        else:
-            fp_hall_fields.append(field)
-
-    # Walk GT fields the model missed entirely
-    for field in gt:
-        if field not in pred:
+                # Wrong value: model tried but got it wrong → False Negative
+                fn_fields.append(field)
+        elif has_gt and not has_pred:
+            # GT has a value but model said nothing → False Negative (silent miss)
             fn_fields.append(field)
+        elif not has_gt and has_pred:
+            # Nothing to predict but model output something → False Positive
+            fp_fields.append(field)
+        else:
+            # Nothing to predict and model correctly said nothing → True Negative
+            tn_fields.append(field)
 
     return {
         "tp": len(tp_fields),
-        "fp_wrong": len(fp_wrong_fields),
-        "fp_hall": len(fp_hall_fields),
+        "fp": len(fp_fields),
         "fn": len(fn_fields),
+        "tn": len(tn_fields),
         "tp_fields": tp_fields,
-        "fp_wrong_fields": fp_wrong_fields,
-        "fp_hall_fields": fp_hall_fields,
+        "fp_fields": fp_fields,
         "fn_fields": fn_fields,
+        "tn_fields": tn_fields,
     }
 
 
@@ -142,46 +156,43 @@ def classify_fields(
 
 def field_stats(results: list[dict], soft: bool = False) -> dict[str, dict]:
     """
-    Compute precision / recall / F1 per field across all documents that have GT.
+    Compute precision / recall / F1 / counts per field across all labelled docs.
 
     Only documents where result["gt"] is non-empty are included.
 
     Returns
     -------
-    dict keyed by field_name, each value a dict with:
-        precision   float  TP / (TP + FP_WRONG + FP_HALL)
-        recall      float  TP / (TP + FN)
-        f1          float  harmonic mean
-        tp          int
-        fp_wrong    int
-        fp_hall     int
-        fn          int
+    dict keyed by field_name (one entry per field in the vocabulary), each value:
+        precision   float | None   TP / (TP + FP)
+        recall      float | None   TP / (TP + FN)
+        f1          float | None   harmonic mean of precision and recall
+        tp, fp, fn, tn   int       raw counts across all documents
 
-    Precision/recall are None when the denominator is 0
-    (e.g. a field never appears in GT → recall denominator is 0).
+    precision/recall are None when the denominator is 0 (e.g. a field never
+    appears in GT across the whole dataset → recall denominator is always 0).
     """
-    # Accumulators: per field, collect raw counts across docs
     counts: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"tp": 0, "fp_wrong": 0, "fp_hall": 0, "fn": 0}
+        lambda: {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     )
 
     for r in results:
         if not r.get("gt"):
             continue
         clf = classify_fields(r["pred"], r["gt"], soft=soft)
-        # attribute tp/fp/fn to each specific field
         for field in clf["tp_fields"]:
             counts[field]["tp"] += 1
-        for field in clf["fp_wrong_fields"]:
-            counts[field]["fp_wrong"] += 1
-        for field in clf["fp_hall_fields"]:
-            counts[field]["fp_hall"] += 1
+        for field in clf["fp_fields"]:
+            counts[field]["fp"] += 1
         for field in clf["fn_fields"]:
             counts[field]["fn"] += 1
+        for field in clf["tn_fields"]:
+            counts[field]["tn"] += 1
 
     stats: dict[str, dict] = {}
-    for field, c in counts.items():
-        prec_denom = c["tp"] + c["fp_wrong"] + c["fp_hall"]
+    for field in _VOCAB:
+        c = counts[field]
+
+        prec_denom = c["tp"] + c["fp"]
         rec_denom = c["tp"] + c["fn"]
 
         precision = c["tp"] / prec_denom if prec_denom > 0 else None
@@ -192,12 +203,8 @@ def field_stats(results: list[dict], soft: bool = False) -> dict[str, dict]:
         else:
             f1 = None
 
-        stats[field] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            **c,
-        }
+        stats[field] = {"precision": precision, "recall": recall, "f1": f1, **c}
+
     return stats
 
 
@@ -208,32 +215,14 @@ def doc_stats(results: list[dict], soft: bool = False) -> dict:
     """
     Categorize each document and return aggregate counts.
 
-    Categories (mutually exclusive, checked in this order):
-        perfect          all GT fields found with correct values (FP_HALL allowed but
-                         not counted as imperfect — model can produce extras and still
-                         get "all GT right". Change this if over-extraction should
-                         count against perfectness.)
-        all_found_wrong  model found every GT field (FN == 0) but ≥1 value is wrong
-        under_extracted  model missed ≥1 GT field (FN > 0), regardless of hallucinations
-        over_extracted   model hallucinated ≥1 field (FP_HALL > 0) but FN == 0 and TP covers all GT
-        mixed            both FN > 0 and FP_HALL > 0
+    Categories (mutually exclusive):
+        perfect      FP == 0  and  FN == 0  — all extractions correct, no hallucinations
+        fn_only      FN > 0   and  FP == 0  — some fields wrong/missing, no hallucinations
+        fp_only      FP > 0   and  FN == 0  — hallucinations only, all GT fields correct
+        mixed        FP > 0   and  FN > 0   — both wrong/missing and hallucinations
 
-    NOTE: "perfect" here means all GT fields found with correct values.
-    A document with FP_HALL > 0 but TP == len(gt) is currently marked "perfect"
-    because the GT is fully satisfied. If you want to penalise hallucinations,
-    change the `perfect` condition below to also require fp_hall == 0.
-
-    Returns
-    -------
-    dict with:
-        n_total          int
-        n_with_gt        int   — documents that had ground truth
-        perfect          int
-        all_found_wrong  int
-        under_extracted  int
-        over_extracted   int
-        mixed            int
-        per_doc          list[dict]  — raw clf + category per document (for Jupyter slicing)
+    Each entry in per_doc carries the raw clf dict for Jupyter-side slicing:
+        {"image": ..., "category": ..., "tp": ..., "fp": ..., "fn": ..., "tn": ...}
     """
     per_doc = []
     category_counts: dict[str, int] = defaultdict(int)
@@ -242,28 +231,20 @@ def doc_stats(results: list[dict], soft: bool = False) -> dict:
     for r in results:
         gt = r.get("gt", {})
         if not gt:
-            per_doc.append({"image": r["image"], "category": "no_gt", **{}})
+            per_doc.append({"image": r["image"], "category": "no_gt"})
             continue
 
         n_with_gt += 1
         clf = classify_fields(r["pred"], gt, soft=soft)
 
-        # Determine category
-        if clf["fn"] == 0 and clf["fp_wrong"] == 0:
-            # All GT fields found and correct (hallucinations allowed by default)
+        if clf["fp"] == 0 and clf["fn"] == 0:
             category = "perfect"
-        elif clf["fn"] == 0 and clf["fp_wrong"] > 0:
-            # Found every GT field but at least one value is wrong
-            category = "all_found_wrong"
-        elif clf["fn"] > 0 and clf["fp_hall"] > 0:
-            # Both missed fields and hallucinated ones
-            category = "mixed"
-        elif clf["fn"] > 0:
-            # Missed GT fields, no hallucinations
-            category = "under_extracted"
+        elif clf["fn"] > 0 and clf["fp"] == 0:
+            category = "fn_only"
+        elif clf["fp"] > 0 and clf["fn"] == 0:
+            category = "fp_only"
         else:
-            # FP_HALL > 0, FN == 0, FP_WRONG == 0 — all GT correct but extra hallucinations
-            category = "over_extracted"
+            category = "mixed"
 
         category_counts[category] += 1
         per_doc.append({"image": r["image"], "category": category, **clf})
@@ -272,9 +253,8 @@ def doc_stats(results: list[dict], soft: bool = False) -> dict:
         "n_total": len(results),
         "n_with_gt": n_with_gt,
         "perfect": category_counts["perfect"],
-        "all_found_wrong": category_counts["all_found_wrong"],
-        "under_extracted": category_counts["under_extracted"],
-        "over_extracted": category_counts["over_extracted"],
+        "fn_only": category_counts["fn_only"],
+        "fp_only": category_counts["fp_only"],
         "mixed": category_counts["mixed"],
         "per_doc": per_doc,
     }
@@ -305,28 +285,28 @@ def summarize(results: list[dict], soft: bool = False) -> None:
         print("  No ground-truth labels found — skipping metrics.")
         return
 
-    # Per-field table
-    print(f"\n  Per-field  (n_docs_with_gt={n_with_gt})\n")
-    header = f"  {'Field':<28}  {'Prec':>6}  {'Rec':>6}  {'F1':>6}  {'TP':>4}  {'FP_wrong':>8}  {'FP_hall':>7}  {'FN':>4}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
-
     def _fmt(v) -> str:
         return f"{v:.1%}" if v is not None else "  N/A "
+
+    # Per-field table
+    print(f"\n  Per-field  (n_docs_with_gt={n_with_gt})\n")
+    header = f"  {'Field':<28}  {'Prec':>6}  {'Rec':>6}  {'F1':>6}  {'TP':>4}  {'FP':>4}  {'FN':>4}  {'TN':>4}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
 
     for field in sorted(fstats):
         s = fstats[field]
         print(
             f"  {field:<28}  {_fmt(s['precision']):>6}  {_fmt(s['recall']):>6}"
-            f"  {_fmt(s['f1']):>6}  {s['tp']:>4}  {s['fp_wrong']:>8}  {s['fp_hall']:>7}  {s['fn']:>4}"
+            f"  {_fmt(s['f1']):>6}  {s['tp']:>4}  {s['fp']:>4}  {s['fn']:>4}  {s['tn']:>4}"
         )
 
     # Document-level breakdown
     print(f"\n  Document-level  (n={n_with_gt})\n")
-    cats = ["perfect", "all_found_wrong", "under_extracted", "over_extracted", "mixed"]
+    cats = ["perfect", "fn_only", "fp_only", "mixed"]
     for cat in cats:
         n = dstats[cat]
         pct = n / n_with_gt
         bar = "█" * int(pct * 20)
-        print(f"  {cat:<20}  {n:>4}  {pct:>6.1%}  {bar}")
+        print(f"  {cat:<12}  {n:>4}  {pct:>6.1%}  {bar}")
     print()

@@ -80,6 +80,7 @@ def predict(cfg: Config) -> None:
     samples = load_samples(Path(cfg.data_json))
     print(f"Processing {len(samples)} samples ...")
 
+    model_dtype = next(model.parameters()).dtype
     task_ids = processor.tokenizer(
         TASK_TOKEN, add_special_tokens=False, return_tensors="pt"
     ).input_ids.to(cfg.device)
@@ -89,7 +90,9 @@ def predict(cfg: Config) -> None:
 
     for i, sample in enumerate(samples):
         image = Image.open(sample["image"]).convert("RGB")
-        pixel_values = processor(image, return_tensors="pt").pixel_values.to(cfg.device)
+        pixel_values = processor(image, return_tensors="pt").pixel_values.to(
+            device=cfg.device, dtype=model_dtype
+        )
 
         with torch.no_grad():
             output_ids = model.generate(

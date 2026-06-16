@@ -90,9 +90,10 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> float |
     if len(loader) == 0:
         return None
     model.eval()
+    model_dtype = next(model.parameters()).dtype
     total_loss = 0.0
     for batch in loader:
-        pixel_values = batch["pixel_values"].to(device)
+        pixel_values = batch["pixel_values"].to(device=device, dtype=model_dtype)
         labels = batch["labels"].to(device)
         total_loss += model(pixel_values=pixel_values, labels=labels).loss.item()
     return total_loss / len(loader)
@@ -179,6 +180,7 @@ def train(config: Config) -> None:
     else:
         print(f"Loading model from {config.model_name} (backend={config.backend}) ...")
     model = build_model(config, processor)
+    model_dtype = next(model.parameters()).dtype
 
     # --- optimizer + scheduler ---
     optimizer = torch.optim.AdamW(
@@ -204,7 +206,9 @@ def train(config: Config) -> None:
         epoch_start = time.time()
 
         for batch in train_loader:
-            pixel_values = batch["pixel_values"].to(config.device)
+            pixel_values = batch["pixel_values"].to(
+                device=config.device, dtype=model_dtype
+            )
             labels = batch["labels"].to(config.device)
 
             loss = model(pixel_values=pixel_values, labels=labels).loss

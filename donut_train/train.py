@@ -51,6 +51,11 @@ class Config(BaseSettings):
     # patches except mask caching; "sdpa" adds PyTorch SDPA; "fa" requires CUDA + flash-attn.
     backend: str = "sdpa"
 
+    grad_clip: float = 1.0
+    weight_decay: float = 0.01
+    # Set to fix random.shuffle order and torch ops for reproducible val splits.
+    seed: int | None = None
+
     # When True: use the tiny random model from donut.synthetic on a small data
     # subset. Runs on CPU in seconds with no HF downloads. Zero exit = pipeline OK.
     smoke: bool = False
@@ -81,7 +86,9 @@ def build_model(cfg: "Config", processor):
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> float:
+def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> float | None:
+    if len(loader) == 0:
+        return None
     model.eval()
     total_loss = 0.0
     for batch in loader:
@@ -129,6 +136,9 @@ def train(config: Config) -> None:
     }
     samples = load_samples(Path(config.data_json))
 
+    if config.seed is not None:
+        random.seed(config.seed)
+        torch.manual_seed(config.seed)
     random.shuffle(samples)
     if config.smoke:
         samples = samples[: config.smoke_n_samples]
@@ -148,18 +158,19 @@ def train(config: Config) -> None:
         config.max_length,
         token2json_format=config.token2json_format,
     )
+    pin_memory = "cuda" in config.device
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     # --- model ---
@@ -170,7 +181,9 @@ def train(config: Config) -> None:
     model = build_model(config, processor)
 
     # --- optimizer + scheduler ---
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+    )
     total_steps = len(train_loader) * config.max_epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -179,7 +192,8 @@ def train(config: Config) -> None:
     )
     print(f"Total steps: {total_steps}  warmup: {config.warmup_steps}\n")
 
-    Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    if not config.smoke:
+        Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     global_step = 0
 
     for epoch in range(config.max_epochs):
@@ -195,7 +209,7 @@ def train(config: Config) -> None:
 
             loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
@@ -214,20 +228,17 @@ def train(config: Config) -> None:
         val_loss = evaluate(model, val_loader, config.device)
         model.train()
 
+        val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
         print(
             f"Epoch {epoch + 1:3d}/{config.max_epochs}"
-            f"  train={train_loss:.4f}  val={val_loss:.4f}"
+            f"  train={train_loss:.4f}  val={val_str}"
             f"  │  {docs_per_sec:.1f} docs/s  {epoch_secs:.0f}s"
         )
         if config.mlflow_experiment:
-            mlflow.log_metrics(
-                {
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "docs_per_sec": docs_per_sec,
-                },
-                step=epoch + 1,
-            )
+            metrics = {"train_loss": train_loss, "docs_per_sec": docs_per_sec}
+            if val_loss is not None:
+                metrics["val_loss"] = val_loss
+            mlflow.log_metrics(metrics, step=epoch + 1)
 
         # --- checkpoint ---
         if not config.smoke and (epoch + 1) % config.save_every_n_epochs == 0:

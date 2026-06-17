@@ -67,7 +67,7 @@ uv run python predict.py --checkpoint checkpoints/epoch_030_val0.09.pt \
 | `--weight_decay`      | 0.01           | AdamW weight decay.                                         |
 | `--grad_clip`         | 1.0            | gradient-norm clip.                                        |
 | `--warmup_steps`      | 100            | linear-warmup steps.                                       |
-| `--token2json_format` | false          | encode fields as `<s_x>v</s_x>` (parseable) vs legacy.      |
+| `--token2json_format` | true           | encode every field as `<s_x>v or <missing></s_x>` (parseable) vs legacy. |
 | `--output_dir`        | checkpoints    | where `epoch_NNN_valX.pt` checkpoints go.                  |
 | `--ablation_out`      | None           | **write a one-run F1 summary JSON here** (see below).       |
 | `--mlflow_experiment` | None           | set a name to log params/metrics to MLflow.                |

@@ -1,6 +1,10 @@
 # Token vocabulary
 TASK_TOKEN:  "<s_donut>"
 
+# Placeholder content for an absent field (token2json format only) — lets the
+# model learn an explicit "missing" signal instead of an empty span.
+MISSING_TOKEN: "<missing>"
+
 # Legacy symmetric format: <field> value <field>
 FIELD_TOKENS :
   - "<destinataire>"

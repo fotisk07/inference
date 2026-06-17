@@ -10,12 +10,12 @@ from transformers import DonutProcessor
 # ── Vocabulary ────────────────────────────────────────────────────────────────
 
 
-def _load_vocab() -> tuple[str, list[str]]:
+def _load_vocab() -> tuple[str, list[str], str]:
     cfg = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
-    return cfg["TASK_TOKEN"], cfg["FIELD_TOKENS"]
+    return cfg["TASK_TOKEN"], cfg["FIELD_TOKENS"], cfg["MISSING_TOKEN"]
 
 
-TASK_TOKEN, FIELD_TOKENS = _load_vocab()
+TASK_TOKEN, FIELD_TOKENS, MISSING_TOKEN = _load_vocab()
 
 
 def _t2j_pairs() -> list[tuple[str, str]]:
@@ -30,7 +30,7 @@ def build_processor(model_name: str, token2json_format: bool = False) -> DonutPr
     """Load DonutProcessor and register all task + field tokens."""
     processor = DonutProcessor.from_pretrained(model_name)
     if token2json_format:
-        extra = [t for pair in _t2j_pairs() for t in pair]
+        extra = [t for pair in _t2j_pairs() for t in pair] + [MISSING_TOKEN]
     else:
         extra = list(FIELD_TOKENS)
     processor.tokenizer.add_special_tokens(
@@ -59,7 +59,11 @@ def format_label(
 
     token2json_format=True (XML-like, parseable with processor.token2json()):
         present : "<s_E-mail>foo@bar.com</s_E-mail>"
-        missing : "<s_E-mail></s_E-mail>"   (only when include_missing=True)
+        missing : "<s_E-mail><missing></s_E-mail>"
+
+    token2json_format always emits every field in FIELD_TOKENS order — present
+    or not — so the model learns a fixed-length, fixed-order template with an
+    explicit "absent" signal. `include_missing` only affects the legacy branch.
     """
     seen: set[str] = set()
     deduped = []
@@ -78,10 +82,7 @@ def format_label(
         for open_tok, close_tok in _t2j_pairs():
             leaf = open_tok[3:-1]  # "<s_E-mail>" → "E-mail"
             value = values.get(leaf, "")
-            if value:
-                parts.append(f"{open_tok}{value}{close_tok}")
-            elif include_missing:
-                parts.append(f"{open_tok}{close_tok}")
+            parts.append(f"{open_tok}{value or MISSING_TOKEN}{close_tok}")
         return "".join(parts)
     else:
         for token in FIELD_TOKENS:
@@ -108,7 +109,8 @@ def _flatten(obj, prefix: str = "") -> dict[str, str]:
             out.update(_flatten(item, prefix))
     else:
         if prefix:
-            out[prefix] = str(obj) if obj is not None else ""
+            value = str(obj) if obj is not None else ""
+            out[prefix] = "" if value == MISSING_TOKEN else value
     return out
 
 
@@ -135,14 +137,27 @@ def _parse_legacy(decoded: str) -> dict[str, str]:
 
     The model produces something like:
         <s_donut><E-mail> a@b.com <E-mail><valor_da_nota> 100 <valor_da_nota>
+
+    Lenient by design: a field's value runs from just after its opening token
+    to the next field token (including a literal closing duplicate, if the
+    model emitted one) or EOS — whichever comes first — rather than requiring
+    the literal duplicate closing token. The model emits the closing duplicate
+    as a second occurrence of the *same* token id as the opening one, with no
+    structural cue distinguishing open from close; when it skips re-emitting
+    it, this still recovers the value instead of dropping the whole field.
     """
+    boundary = "|".join(re.escape(t) for t in FIELD_TOKENS) + r"|</s>"
     result: dict[str, str] = {}
     for token in FIELD_TOKENS:
         leaf = token[1:-1]  # "<E-mail>" → "E-mail"
-        pattern = re.escape(token) + r"\s*(.*?)\s*" + re.escape(token)
-        match = re.search(pattern, decoded, re.DOTALL)
-        if match:
-            result[leaf] = match.group(1).strip()
+        start = re.search(re.escape(token), decoded)
+        if not start:
+            continue
+        rest = decoded[start.end() :]
+        end = re.search(boundary, rest)
+        value = (rest[: end.start()] if end else rest).strip()
+        if value:
+            result[leaf] = value
     return result
 
 

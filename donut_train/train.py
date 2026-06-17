@@ -50,10 +50,11 @@ class Config(BaseSettings):
     # Name shown in the MLflow UI for this run; auto-generated from lr+bs if None.
     run_name: str | None = None
 
-    # When True: encodes fields as <s_field>value</s_field> — output parseable
-    # with processor.token2json(seq) after stripping task/pad/EOS tokens.
-    # When False (default): legacy symmetric format <field> value <field>.
-    token2json_format: bool = False
+    # When True (default): encodes fields as <s_field>value</s_field>, always
+    # emitting every field (missing ones get a <missing> placeholder) — output
+    # parseable with processor.token2json(seq) after stripping task/pad/EOS
+    # tokens. When False: legacy symmetric format <field> value <field>.
+    token2json_format: bool = True
 
     # Acceleration backend passed to donut.load_model(). "eager" disables all
     # patches except mask caching; "sdpa" adds PyTorch SDPA; "fa" requires CUDA + flash-attn.

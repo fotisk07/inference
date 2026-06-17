@@ -51,6 +51,7 @@ for size in "${SIZES[@]}"; do
     --seed        "$SEED" \
     --device      "$DEVICE" \
     --smoke       "$SMOKE" \
+    --token2json_format true \
     --output_dir  "checkpoints/$tag" \
     --ablation_out "$OUT_DIR/$tag.json"
 done

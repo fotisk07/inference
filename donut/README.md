@@ -16,7 +16,6 @@ from donut import load_model, apply_accel, revert_accel, check_accel
 model, processor = load_model()                  # auto device/dtype, sdpa backend
 model, processor = load_model(backend="eager")   # mask caching only
 model, processor = load_model(backend="fa")      # flash-attn decoder (CUDA)
-model, processor = load_model(compile=True)      # + torch.compile(dynamic=True)
 
 apply_accel(model, "sdpa")    # apply a preset in-place (idempotent)
 check_accel(model, "sdpa")    # assert it is structurally active
@@ -32,8 +31,7 @@ Backends (`donut.accel.PRESETS`):
 | `fa`    | mask cache + encoder SDPA patch + decoder flash-attention dispatch |
 
 `fa` picks `flash_attention_2` or `flash_attention_4` from what is installed
-and raises if neither is available (no silent fallback). `compile=True`
-appends torch.compile as the final step.
+and raises if neither is available (no silent fallback).
 
 ## Layout
 
@@ -47,6 +45,9 @@ tests/              pytest suite — CPU, offline, ~1s (tiny random model)
 scripts/            audit + benchmark CLIs; save to results/, print a summary
 notebooks/          audit.ipynb / bench.ipynb — visualize results/
 ```
+
+For running the speed sweep (backends × image size × batch size) and reading the
+results, see **[BENCHMARKING.md](BENCHMARKING.md)**.
 
 ## Auditing workflow
 
@@ -112,8 +113,8 @@ Then wire and verify it:
 
 1. Add a step in `src/donut/accel/__init__.py`:
    `MY_OPT = (apply_my_opt, revert_my_opt, check_my_opt)` and put it in an
-   existing or new `PRESETS` entry. Order matters: mask cache first,
-   torch.compile always last.
+   existing or new `PRESETS` entry. Order matters: mask cache first (the SDPA
+   encoder patch consumes its cached bias).
 2. Add a `tests/test_numerical.py` case proving output equivalence (or
    bounded divergence) on the tiny fixture, and rely on
    `test_accel_apply_revert.py` to cover the apply/check/revert round-trip by
@@ -136,8 +137,6 @@ between configs.
   `audit_layers.py` would quantify the numerical cost.
 - **Quantization** — int8/fp8 weights via torchao as a load-time step
   (revert = reload); decoder lm_head and FFNs are the obvious targets.
-- **torch.compile tuning** — `mode="reduce-overhead"`, regional compilation of
-  decoder layers only, `fullgraph=True` on the encoder.
 - **Static KV cache + CUDA graphs** — `generate(cache_implementation="static")`
   to eliminate per-step launch overhead at TPOT.
 - **Batching** — continuous batching of decoder steps; `bench_speed.py

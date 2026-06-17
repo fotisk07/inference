@@ -72,7 +72,7 @@ def test_apply_idempotent(tiny_model, pixel_values):
 def test_fa2_alias_maps_to_fa_preset():
     from donut.accel import _steps
 
-    assert _steps("fa2", compile=False) == _steps("fa", compile=False)
+    assert _steps("fa2") == _steps("fa")
 
 
 def test_unknown_backend_raises(tiny_model):

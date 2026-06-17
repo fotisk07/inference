@@ -1,5 +1,6 @@
 """Donut fine-tuning training script."""
 
+import json
 import random
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ import torch
 from tqdm import tqdm
 from dataset import DonutDataset, build_processor, load_samples
 from donut import load_model
+from predict import predict_and_score
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader
@@ -37,6 +39,11 @@ class Config(BaseSettings):
 
     output_dir: str = "checkpoints"
     save_every_n_epochs: int = 1
+
+    # When set, after training run a field-level eval on the validation split and
+    # write a one-line ablation summary (config + F1 + speed) to this JSON path.
+    # This is what the scripts/exp_*.sh sweeps collect for notebooks/ablation.ipynb.
+    ablation_out: str | None = None
 
     # Set to an experiment name to enable MLflow logging, None to disable.
     mlflow_experiment: str | None = None
@@ -272,6 +279,42 @@ def train(config: Config) -> None:
             print(f"           saved → {ckpt_path}")
 
     print("\nTraining complete.")
+
+    # --- ablation summary: field-level F1 on the val split (final-epoch weights) ---
+    if config.ablation_out and val_samples:
+        print("\nScoring validation split for ablation summary ...")
+        quality = predict_and_score(
+            model,
+            processor,
+            val_samples,
+            token2json_format=config.token2json_format,
+            device=config.device,
+            max_new_tokens=config.max_length,
+        )
+        summary = {
+            "image_size": list(config.image_size),
+            "batch_size": config.batch_size,
+            "lr": config.lr,
+            "max_epochs": config.max_epochs,
+            "backend": config.backend,
+            "model_name": config.model_name,
+            "n_train": len(train_samples),
+            "final_val_loss": val_loss,
+            "docs_per_sec": docs_per_sec,
+            "f1_strict": quality["strict"]["f1"],
+            "f1_soft": quality["soft"]["f1"],
+            "quality": quality,
+            "config": config.model_dump(),
+        }
+        out_path = Path(config.ablation_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+        print(f"Ablation summary → {out_path}  (f1_strict={summary['f1_strict']})")
+        if config.mlflow_experiment:
+            for k in ("f1_strict", "f1_soft"):
+                if summary[k] is not None:
+                    mlflow.log_metric(k, summary[k])
+
     if config.mlflow_experiment:
         mlflow.end_run()
 

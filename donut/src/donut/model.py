@@ -10,14 +10,12 @@ def load_model(
     device: str | None = None,
     dtype: torch.dtype | None = None,
     backend: str = "sdpa",
-    compile: bool = False,
 ) -> tuple[VisionEncoderDecoderModel, DonutProcessor]:
     """Load Donut model and processor with the specified acceleration backend.
 
     device=None picks cuda when available, else cpu; dtype=None picks bfloat16
     on cuda, float32 on cpu. Applies mask caching and the chosen attention
-    backend before returning. Pass compile=True to additionally wrap with
-    torch.compile(dynamic=True). Returns (model, processor) ready for inference.
+    backend before returning. Returns (model, processor) ready for inference.
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -26,5 +24,5 @@ def load_model(
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id, dtype=dtype)
     model.to(device).eval()
-    apply_accel(model, backend, compile=compile)
+    apply_accel(model, backend)
     return model, processor

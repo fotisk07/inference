@@ -68,26 +68,49 @@ def bench_generate(
     *,
     batch_size: int = 1,
     max_new_tokens: int = 20,
+    gen_mode: str = "fixed",
     n_warmup: int = 2,
     n_runs: int = 10,
     seed: int = 42,
 ) -> dict:
-    """Benchmark a full generate() call (encoder + cached decoding), synthetic input."""
+    """Benchmark a full generate() call (encoder + cached decoding), synthetic input.
+
+    gen_mode controls how many tokens are decoded:
+      "fixed" -- always emit exactly max_new_tokens (min == max). Clean per-step
+                 timing, decoupled from content; the default.
+      "eos"   -- stop naturally at EOS (capped by max_new_tokens), so latency
+                 reflects content-dependent decode length. With synthetic pixels
+                 the stopping point is model-dependent noise, so this is most
+                 meaningful when max_new_tokens is set to a representative real
+                 output length. The realized mean new-token count is reported as
+                 "new_tokens" and used for throughput.
+    """
     pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
     decoder_input_ids = make_decoder_input_ids(model, batch_size=batch_size)
+    prompt_len = decoder_input_ids.shape[1]
     pad_id = model.config.decoder.pad_token_id
     if pad_id is None:
         pad_id = model.config.decoder.eos_token_id
+    min_new_tokens = max_new_tokens if gen_mode == "fixed" else 1
 
-    def fn():
+    def run():
         with torch.no_grad():
-            model.generate(
+            return model.generate(
                 pixel_values=pixel_values,
                 decoder_input_ids=decoder_input_ids,
                 max_new_tokens=max_new_tokens,
-                min_new_tokens=max_new_tokens,
+                min_new_tokens=min_new_tokens,
                 pad_token_id=pad_id,
                 use_cache=True,
             )
 
-    return time_fn(fn, n_warmup, n_runs)
+    # Realized new-token count: exact in fixed mode; measured once in eos mode.
+    if gen_mode == "fixed":
+        new_tokens = float(max_new_tokens)
+    else:
+        out = run()
+        new_tokens = round(out.shape[1] - prompt_len, 2)
+
+    stats = time_fn(run, n_warmup, n_runs)
+    stats["new_tokens"] = new_tokens
+    return stats

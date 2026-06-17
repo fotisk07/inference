@@ -43,7 +43,13 @@ def main() -> None:
         "H and W must be divisible by 40 (patch_size=4 × window_size=10) for donut-base.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
-    parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--gen-mode",
+        choices=["fixed", "eos"],
+        default="fixed",
+        help="fixed: always emit max-new-tokens (clean per-step timing). "
+        "eos: stop at EOS, capped by max-new-tokens (content-dependent length).",
+    )
     parser.add_argument(
         "--n-runs",
         type=int,
@@ -68,7 +74,7 @@ def main() -> None:
 
     model, model_id = load_baseline_model(args)
 
-    def bench_at_size(backend: str, compiled: bool, h: int, w: int) -> list[dict]:
+    def bench_at_size(backend: str, h: int, w: int) -> list[dict]:
         rows = []
         for bs in batch_sizes:
             enc = bench_encoder(
@@ -82,6 +88,7 @@ def main() -> None:
                 model,
                 batch_size=bs,
                 max_new_tokens=args.max_new_tokens,
+                gen_mode=args.gen_mode,
                 n_warmup=n_warm_gen,
                 n_runs=n_runs_gen,
                 seed=args.seed,
@@ -91,14 +98,14 @@ def main() -> None:
                     "image_height": h,
                     "image_width": w,
                     "backend": backend,
-                    "compile": compiled,
                     "batch_size": bs,
+                    "gen_mode": args.gen_mode,
                     "encoder": enc,
                     "generate": gen,
                     "throughput": {
                         "images_per_s": round(1000 * bs / gen["mean_ms"], 3),
                         "tokens_per_s": round(
-                            1000 * bs * args.max_new_tokens / gen["mean_ms"], 3
+                            1000 * bs * gen["new_tokens"] / gen["mean_ms"], 3
                         ),
                     },
                 }
@@ -114,11 +121,11 @@ def main() -> None:
         # (size-agnostic) and shifted-window masks are recomputed from feature-map shape.
         model.encoder.config.image_size = [h, w]
 
-        size_records = bench_at_size("baseline", compiled=False, h=h, w=w)
+        size_records = bench_at_size("baseline", h=h, w=w)
         for backend in backends:
-            apply_accel(model, backend, compile=args.compile)
-            check_accel(model, backend, compile=args.compile)
-            size_records.extend(bench_at_size(backend, compiled=args.compile, h=h, w=w))
+            apply_accel(model, backend)
+            check_accel(model, backend)
+            size_records.extend(bench_at_size(backend, h=h, w=w))
             revert_accel(model)
 
         # Speedup is computed relative to baseline within each image-size group.
@@ -128,8 +135,12 @@ def main() -> None:
         for r in size_records:
             ref = baseline_map[r["batch_size"]]
             r["speedup_vs_baseline"] = {
-                "encoder": round(ref["encoder"]["mean_ms"] / r["encoder"]["mean_ms"], 3),
-                "generate": round(ref["generate"]["mean_ms"] / r["generate"]["mean_ms"], 3),
+                "encoder": round(
+                    ref["encoder"]["mean_ms"] / r["encoder"]["mean_ms"], 3
+                ),
+                "generate": round(
+                    ref["generate"]["mean_ms"] / r["generate"]["mean_ms"], 3
+                ),
             }
 
         records.extend(size_records)

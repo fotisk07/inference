@@ -14,7 +14,6 @@ with the three functions and add its step to PRESETS.
 
 from collections.abc import Callable
 
-from donut.accel.compile import apply_compile, check_compile, revert_compile
 from donut.accel.decoder_fa import (
     apply_decoder_fa,
     check_decoder_fa,
@@ -39,10 +38,9 @@ MASK_CACHE: Step = (apply_mask_cache, revert_mask_cache, check_mask_cache)
 ENCODER_SDPA: Step = (apply_encoder_sdpa, revert_encoder_sdpa, check_encoder_sdpa)
 DECODER_SDPA: Step = (apply_decoder_sdpa, revert_decoder_sdpa, check_decoder_sdpa)
 DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
-COMPILE: Step = (apply_compile, revert_compile, check_compile)
 
 # Mask caching is always first (universally beneficial; the SDPA encoder patch
-# consumes its cached bias). Compile, when requested, is appended last.
+# consumes its cached bias).
 PRESETS: dict[str, list[Step]] = {
     "eager": [MASK_CACHE],
     "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
@@ -52,21 +50,21 @@ PRESETS: dict[str, list[Step]] = {
 _ALIASES = {"fa2": "fa"}
 
 
-def _steps(backend: str, compile: bool) -> list[Step]:
+def _steps(backend: str) -> list[Step]:
     backend = _ALIASES.get(str(backend), str(backend))
     if backend not in PRESETS:
         raise ValueError(f"Unknown backend {backend!r}; choose from {sorted(PRESETS)}")
-    return list(PRESETS[backend]) + ([COMPILE] if compile else [])
+    return list(PRESETS[backend])
 
 
-def apply_accel(model, backend: str = "sdpa", *, compile: bool = False) -> None:
+def apply_accel(model, backend: str = "sdpa") -> None:
     """Apply a backend preset in-place, recording reverts on the model.
 
     Each apply is idempotent, so re-applying a backend (or layering presets
     that share steps) is safe. Undo everything with revert_accel.
     """
     reverts = getattr(model, "_accel_reverts", [])
-    for apply_fn, revert_fn, _ in _steps(backend, compile):
+    for apply_fn, revert_fn, _ in _steps(backend):
         apply_fn(model)
         reverts.append(revert_fn)
     model._accel_reverts = reverts
@@ -79,14 +77,13 @@ def revert_accel(model) -> None:
     model._accel_reverts = []
 
 
-def check_accel(model, backend: str = "sdpa", *, compile: bool = False) -> None:
+def check_accel(model, backend: str = "sdpa") -> None:
     """Assert every step of a backend preset is active. Raises AssertionError."""
-    for _, _, check_fn in _steps(backend, compile):
+    for _, _, check_fn in _steps(backend):
         check_fn(model)
 
 
 __all__ = [
-    "COMPILE",
     "DECODER_FA",
     "DECODER_SDPA",
     "ENCODER_SDPA",

@@ -7,7 +7,7 @@ import torch
 from dataset import TASK_TOKEN, build_processor, load_samples, parse_prediction
 from tqdm import tqdm
 from donut import load_model
-from metrics import summarize
+from metrics import doc_stats, field_stats, summarize
 from PIL import Image
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -69,37 +69,41 @@ def load_from_checkpoint(ckpt_path: str, backend: str, device: str):
 # ── Inference loop ────────────────────────────────────────────────────────────
 
 
-def predict(cfg: Config) -> None:
-    print(f"Checkpoint : {cfg.checkpoint}")
-    print(f"Data       : {cfg.data_json}")
-    print(f"Backend    : {cfg.backend}  device={cfg.device}\n")
+def run_predictions(
+    model,
+    processor,
+    samples: list[dict],
+    *,
+    token2json_format: bool,
+    device: str,
+    max_new_tokens: int = 128,
+    progress: bool = True,
+) -> tuple[list[dict], list[dict]]:
+    """Generate field predictions for every sample.
 
-    model, processor, token2json_format = load_from_checkpoint(
-        cfg.checkpoint, cfg.backend, cfg.device
-    )
-
-    samples = load_samples(Path(cfg.data_json))
-    print(f"Processing {len(samples)} samples ...")
-
+    Returns (results, output_records):
+      results        — [{"image", "pred", "gt"}] for metrics.py scoring
+      output_records — same aggregate JSON format as train.json, predicted values
+    """
+    model.eval()
     model_dtype = next(model.parameters()).dtype
     task_ids = processor.tokenizer(
         TASK_TOKEN, add_special_tokens=False, return_tensors="pt"
-    ).input_ids.to(cfg.device)
+    ).input_ids.to(device)
 
-    results = []  # for metrics.py
-    output_records = []  # for output JSON
-
-    for i, sample in enumerate(tqdm(samples, desc="predicting")):
+    results, output_records = [], []
+    iterator = tqdm(samples, desc="predicting") if progress else samples
+    for sample in iterator:
         image = Image.open(sample["image"]).convert("RGB")
         pixel_values = processor(image, return_tensors="pt").pixel_values.to(
-            device=cfg.device, dtype=model_dtype
+            device=device, dtype=model_dtype
         )
 
         with torch.no_grad():
             output_ids = model.generate(
                 pixel_values,
                 decoder_input_ids=task_ids,
-                max_new_tokens=cfg.max_new_tokens,
+                max_new_tokens=max_new_tokens,
             )
 
         decoded = processor.tokenizer.decode(output_ids[0], skip_special_tokens=False)
@@ -115,8 +119,6 @@ def predict(cfg: Config) -> None:
         results.append(
             {"image": str(sample["image"]), "pred": pred_fields, "gt": gt_fields}
         )
-
-        # Output record: same aggregate JSON format with predicted values as annotator_text
         output_records.append(
             {
                 "image": str(sample["image"]),
@@ -126,6 +128,87 @@ def predict(cfg: Config) -> None:
                 ],
             }
         )
+
+    return results, output_records
+
+
+def _micro_f1(results: list[dict], soft: bool) -> dict:
+    """Micro-averaged precision/recall/F1 across all fields (sum counts first)."""
+    fs = field_stats(results, soft=soft)
+    tp = sum(s["tp"] for s in fs.values())
+    fp = sum(s["fp"] for s in fs.values())
+    fn = sum(s["fn"] for s in fs.values())
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    if precision and recall:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = None
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+    }
+
+
+def predict_and_score(
+    model,
+    processor,
+    samples: list[dict],
+    *,
+    token2json_format: bool,
+    device: str,
+    max_new_tokens: int = 128,
+    progress: bool = True,
+) -> dict:
+    """Run predictions and return a compact, JSON-serializable quality summary.
+
+    Used by train.py to score each ablation run on its validation split. Reports
+    micro-averaged F1 under strict (exact) and soft (normalized) matching, plus
+    the document-level breakdown (perfect / fn_only / fp_only / mixed).
+    """
+    results, _ = run_predictions(
+        model,
+        processor,
+        samples,
+        token2json_format=token2json_format,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        progress=progress,
+    )
+    ds = doc_stats(results, soft=False)
+    return {
+        "n_samples": len(samples),
+        "n_with_gt": ds["n_with_gt"],
+        "strict": _micro_f1(results, soft=False),
+        "soft": _micro_f1(results, soft=True),
+        "doc_stats": {k: ds[k] for k in ("perfect", "fn_only", "fp_only", "mixed")},
+    }
+
+
+def predict(cfg: Config) -> None:
+    print(f"Checkpoint : {cfg.checkpoint}")
+    print(f"Data       : {cfg.data_json}")
+    print(f"Backend    : {cfg.backend}  device={cfg.device}\n")
+
+    model, processor, token2json_format = load_from_checkpoint(
+        cfg.checkpoint, cfg.backend, cfg.device
+    )
+
+    samples = load_samples(Path(cfg.data_json))
+    print(f"Processing {len(samples)} samples ...")
+
+    results, output_records = run_predictions(
+        model,
+        processor,
+        samples,
+        token2json_format=token2json_format,
+        device=cfg.device,
+        max_new_tokens=cfg.max_new_tokens,
+    )
 
     # Metrics — only when GT is present
     if any(r["gt"] for r in results):

@@ -13,6 +13,7 @@ IMAGE_SIZES="${IMAGE_SIZES:-640x480,960x720,1280x960}"
 BACKENDS="${BACKENDS:-eager,sdpa,fa}"
 BATCH_SIZES="${BATCH_SIZES:-1,2,4,8}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
+GEN_MODE="${GEN_MODE:-fixed}"
 N_RUNS="${N_RUNS:-30}"
 N_WARMUP="${N_WARMUP:-5}"
 OUT="${OUT:-results/ablation}"
@@ -22,6 +23,7 @@ echo "  image_sizes    = $IMAGE_SIZES"
 echo "  backends       = $BACKENDS"
 echo "  batch_sizes    = $BATCH_SIZES"
 echo "  max_new_tokens = $MAX_NEW_TOKENS"
+echo "  gen_mode       = $GEN_MODE"
 echo "  n_runs / warmup = $N_RUNS / $N_WARMUP"
 echo "  output         = $OUT"
 echo ""
@@ -31,6 +33,7 @@ uv run python bench_speed.py \
   --backends     "$BACKENDS" \
   --batch-sizes  "$BATCH_SIZES" \
   --max-new-tokens "$MAX_NEW_TOKENS" \
+  --gen-mode     "$GEN_MODE" \
   --n-runs       "$N_RUNS" \
   --n-warmup     "$N_WARMUP" \
   --out          "$OUT"

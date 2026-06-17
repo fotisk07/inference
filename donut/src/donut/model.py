@@ -25,4 +25,11 @@ def load_model(
     model = VisionEncoderDecoderModel.from_pretrained(model_id, dtype=dtype)
     model.to(device).eval()
     apply_accel(model, backend)
+
+    # The pretrained checkpoint's generation_config carries a stale max_length
+    # (20) left over from pretraining. Every caller in this codebase controls
+    # length via max_new_tokens, so clear it to avoid the "both max_new_tokens
+    # and max_length seem to have been set" warning on every generate() call.
+    model.generation_config.max_length = None
+
     return model, processor

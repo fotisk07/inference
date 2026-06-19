@@ -6,8 +6,13 @@ benchmarked, and fully reverted. A "baseline" row (no optimizations at all, not
 even mask caching) is always included as the speedup reference within each
 image-size group.
 
-Outputs:
-    <out>/bench_speed.json    {meta, records: [...]}, pd.json_normalize-friendly
+Outputs (one self-describing file per config, so partial/repeated sweeps
+accumulate in the same directory — the notebooks glob them back together):
+    <out>/bench_<HxW>_<backend>_bs<N>.json   {meta, record}
+
+Each measurement is OOM-safe: on CUDA OOM the cache is freed and a status:"oom"
+row is recorded (no timings) so a wide image×batch sweep maps its limits instead
+of aborting.
 
 Usage:
     uv run python scripts/bench_speed.py --backends eager,sdpa,fa --batch-sizes 1,2,4
@@ -15,10 +20,14 @@ Usage:
     uv run python scripts/bench_speed.py --tiny --backends eager,sdpa --n-runs 3
 """
 
-from _common import base_parser, load_baseline_model, run_meta, save_json
+import json
 
-from donut.accel import apply_accel, check_accel, fa_available, revert_accel
+import torch
+from _common import base_parser, load_baseline_model, run_meta, save_json, save_record
+
+from donut.accel import apply_accel, check_accel, revert_accel
 from donut.bench import bench_encoder, bench_generate
+from prettytable import PrettyTable
 
 
 def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
@@ -53,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--n-runs",
         type=int,
-        default=None,
+        default=10,
         help="override runs for encoder AND generate",
     )
     parser.add_argument("--n-warmup", type=int, default=None, help="override warmups")
@@ -63,85 +72,61 @@ def main() -> None:
     backends = [b.strip() for b in args.backends.split(",") if b.strip()]
     image_sizes = _parse_image_sizes(args.image_sizes)
 
-    if "fa" in backends and not fa_available():
-        print("flash-attn unavailable (needs CUDA + flash-attn) — dropping 'fa'")
-        backends = [b for b in backends if b != "fa"]
-
-    n_runs_enc = args.n_runs or 20
-    n_runs_gen = args.n_runs or 10
-    n_warm_enc = args.n_warmup if args.n_warmup is not None else 3
-    n_warm_gen = args.n_warmup if args.n_warmup is not None else 2
-
     model, model_id = load_baseline_model(args)
+    meta = run_meta(args, model_id)
 
-    def bench_at_size(backend: str, h: int, w: int) -> list[dict]:
-        rows = []
-        for bs in batch_sizes:
-            enc = bench_encoder(
-                model,
-                batch_size=bs,
-                n_warmup=n_warm_enc,
-                n_runs=n_runs_enc,
-                seed=args.seed,
-            )
-            gen = bench_generate(
-                model,
-                batch_size=bs,
-                max_new_tokens=args.max_new_tokens,
-                gen_mode=args.gen_mode,
-                n_warmup=n_warm_gen,
-                n_runs=n_runs_gen,
-                seed=args.seed,
-            )
-            rows.append(
-                {
-                    "image_height": h,
-                    "image_width": w,
-                    "backend": backend,
-                    "batch_size": bs,
-                    "gen_mode": args.gen_mode,
-                    "encoder": enc,
-                    "generate": gen,
-                    "throughput": {
-                        "images_per_s": round(1000 * bs / gen["mean_ms"], 3),
-                        "tokens_per_s": round(
-                            1000 * bs * gen["new_tokens"] / gen["mean_ms"], 3
-                        ),
-                    },
-                }
-            )
-        return rows
+    def measure(backend: str, h: int, w: int, bs: int) -> dict:
+        """One (backend, batch_size) measurement, OOM-safe.
+
+        On CUDA OOM the GPU cache is freed and a status:"oom" row (no timings) is
+        returned, so a wide sweep records the limit and keeps going.
+        """
+        base = {
+            "image_height": h,
+            "image_width": w,
+            "backend": backend,
+            "batch_size": bs,
+            "gen_mode": args.gen_mode,
+        }
+        enc = bench_encoder(
+            model,
+            batch_size=bs,
+            n_warmup=args.n_warmup,
+            n_runs=args.n_runs,
+            seed=args.seed,
+        )
+        gen = bench_generate(
+            model,
+            batch_size=bs,
+            max_new_tokens=args.max_new_tokens,
+            gen_mode=args.gen_mode,
+            n_warmup=args.n_warmup,
+            n_runs=args.n_runs,
+            seed=args.seed,
+        )
+
+        return {
+            **base,
+            "status": "ok",
+            "encoder": enc,
+            "generate": gen,
+        }
 
     records = []
 
     for h, w in image_sizes:
-        print(f"\n--- image size {h}×{w} ---")
+        print(f"\n--- image size {h}x{w} ---")
         # Temporarily override config so make_pixel_values uses the correct shape.
         # Swin handles variable image sizes: relative position bias is per-window
         # (size-agnostic) and shifted-window masks are recomputed from feature-map shape.
         model.encoder.config.image_size = [h, w]
 
-        size_records = bench_at_size("baseline", h=h, w=w)
+        size_records = [measure("baseline", h, w, bs) for bs in batch_sizes]
         for backend in backends:
             apply_accel(model, backend)
             check_accel(model, backend)
-            size_records.extend(bench_at_size(backend, h=h, w=w))
+            size_records.extend(measure(backend, h, w, bs) for bs in batch_sizes)
             revert_accel(model)
-
-        # Speedup is computed relative to baseline within each image-size group.
-        baseline_map = {
-            r["batch_size"]: r for r in size_records if r["backend"] == "baseline"
-        }
-        for r in size_records:
-            ref = baseline_map[r["batch_size"]]
-            r["speedup_vs_baseline"] = {
-                "encoder": round(
-                    ref["encoder"]["mean_ms"] / r["encoder"]["mean_ms"], 3
-                ),
-                "generate": round(
-                    ref["generate"]["mean_ms"] / r["generate"]["mean_ms"], 3
-                ),
-            }
 
         records.extend(size_records)
 
@@ -149,21 +134,23 @@ def main() -> None:
         args.out / "bench_speed.json",
         {"meta": run_meta(args, model_id), "records": records},
     )
-
-    print(
-        f"\n{'size':>12} {'backend':>10} {'bs':>3} {'enc ms':>9} {'enc σ':>7} "
-        f"{'gen ms':>9} {'gen σ':>7} {'img/s':>7} {'enc x':>6} {'gen x':>6}"
+    table = PrettyTable()
+    table.field_names = ["size", "backend", "bs", "enc ms", "gen ms", "tok/S"]
+    table.add_rows(
+        [
+            [
+                f"{r['image_height']}x{r['image_width']}",
+                r["backend"],
+                r["batch_size"],
+                r["encoder"]["mean_ms"],
+                r["generate"]["mean_ms"],
+                r["generate"]["mean_ms"],
+                r["generate"]["mean tok/s"],
+            ]
+            for r in records
+        ]
     )
-    for r in records:
-        size_str = f"{r['image_height']}×{r['image_width']}"
-        print(
-            f"{size_str:>12} {r['backend']:>10} {r['batch_size']:>3} "
-            f"{r['encoder']['mean_ms']:>9.2f} {r['encoder']['std_ms']:>7.2f} "
-            f"{r['generate']['mean_ms']:>9.2f} {r['generate']['std_ms']:>7.2f} "
-            f"{r['throughput']['images_per_s']:>7.1f} "
-            f"{r['speedup_vs_baseline']['encoder']:>6.2f} "
-            f"{r['speedup_vs_baseline']['generate']:>6.2f}"
-        )
+    print(table)
 
 
 if __name__ == "__main__":

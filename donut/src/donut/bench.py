@@ -17,7 +17,7 @@ def _cuda_sync():
         torch.cuda.synchronize()
 
 
-def time_fn(fn, n_warmup: int, n_runs: int) -> dict:
+def time_fn(fn, n_warmup: int, n_runs: int, verbose=True) -> dict:
     """Run fn() n_warmup times (discarded), then n_runs times. Return latency stats."""
     for _ in range(n_warmup):
         fn()
@@ -36,13 +36,16 @@ def time_fn(fn, n_warmup: int, n_runs: int) -> dict:
     mean = sum(times_ms) / n
     std = (sum((t - mean) ** 2 for t in times_ms) / n) ** 0.5
 
-    return {
+    res = {
         "mean_ms": round(mean, 3),
         "std_ms": round(std, 3),
         "p50_ms": round(times_ms_sorted[n // 2], 3),
         "p95_ms": round(times_ms_sorted[min(n - 1, int(n * 0.95))], 3),
         "n_runs": n,
     }
+
+    if verbose:
+        res["times"] = times_ms
 
 
 def bench_encoder(
@@ -113,4 +116,6 @@ def bench_generate(
 
     stats = time_fn(run, n_warmup, n_runs)
     stats["new_tokens"] = new_tokens
+    stats["mean tok/s"] = round(1000 / stats["mean_ms"] * new_tokens, 3)
+
     return stats

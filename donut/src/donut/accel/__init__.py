@@ -40,8 +40,11 @@ DECODER_SDPA: Step = (apply_decoder_sdpa, revert_decoder_sdpa, check_decoder_sdp
 DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
 
 # Mask caching is always first (universally beneficial; the SDPA encoder patch
-# consumes its cached bias).
+# consumes its cached bias). Note both "sdpa" and "fa" use the SAME ENCODER_SDPA
+# step — DonutSwin has no flash path — so they differ ONLY in the decoder kernel:
+# "fa" vs "sdpa" is a clean decoder-only comparison; "fa" vs "eager" moves both.
 PRESETS: dict[str, list[Step]] = {
+    "baseline": [],
     "eager": [MASK_CACHE],
     "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
     "fa": [MASK_CACHE, ENCODER_SDPA, DECODER_FA],

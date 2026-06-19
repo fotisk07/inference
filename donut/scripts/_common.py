@@ -9,6 +9,8 @@ from pathlib import Path
 
 import torch
 import transformers
+from donut.constants import MODEL_ID
+from donut.model import load_model
 
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 
@@ -54,27 +56,13 @@ def load_baseline_model(args) -> tuple[torch.nn.Module, str]:
         model = make_tiny_model(seed=0).to(device=device, dtype=dtype)
         model_id = "tiny-random-donut"
     else:
-        from transformers import VisionEncoderDecoderModel
-
-        from donut.constants import MODEL_ID
-
         model_id = args.model_id or MODEL_ID
-        model = VisionEncoderDecoderModel.from_pretrained(model_id, dtype=dtype)
-        model = model.to(device)
+        model,_ = load_model(model_id, device, dtype, backend="baseline")
+        model.to(device)
     return model.eval(), model_id
 
 
-def _git_sha() -> str | None:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=Path(__file__).parent,
-        ).stdout.strip()
-    except Exception:
-        return None
+
 
 
 def run_meta(args, model_id: str) -> dict:
@@ -87,12 +75,24 @@ def run_meta(args, model_id: str) -> dict:
         "transformers": transformers.__version__,
         "seed": args.seed,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "git_sha": _git_sha(),
     }
 
 
 def save_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2))
+    print(f"wrote {path}")
+
+
+def save_record(out_dir: Path, name: str, obj) -> None:
+    """Write one self-describing record JSON into a results directory.
+
+    Per-config files (rather than one monolithic file) let partial/repeated
+    sweeps accumulate in the same directory — run small configs one day, large
+    ones another, and the notebooks glob them all back together.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / name
     path.write_text(json.dumps(obj, indent=2))
     print(f"wrote {path}")
 

@@ -1,33 +1,12 @@
-"""Latency/throughput benchmark: baseline vs accelerated backends, synthetic data.
-
-For each (image_size × backend × batch_size) combination the preset is applied,
-structurally verified with check_accel (never bench an unverified config),
-benchmarked, and fully reverted. A "baseline" row (no optimizations at all, not
-even mask caching) is always included as the speedup reference within each
-image-size group.
-
-Outputs (one self-describing file per config, so partial/repeated sweeps
-accumulate in the same directory — the notebooks glob them back together):
-    <out>/bench_<HxW>_<backend>_bs<N>.json   {meta, record}
-
-Each measurement is OOM-safe: on CUDA OOM the cache is freed and a status:"oom"
-row is recorded (no timings) so a wide image×batch sweep maps its limits instead
-of aborting.
-
-Usage:
-    uv run python scripts/bench_speed.py --backends eager,sdpa,fa --batch-sizes 1,2,4
-    uv run python scripts/bench_speed.py --image-sizes 640x480,960x720,1280x960
-    uv run python scripts/bench_speed.py --tiny --backends eager,sdpa --n-runs 3
-"""
-
-import json
-
-import torch
-from _common import base_parser, load_baseline_model, run_meta, save_json, save_record
+from _common import load_baseline_model, run_meta, save_json
 
 from donut.accel import apply_accel, check_accel, revert_accel
 from donut.bench import bench_encoder, bench_generate
 from prettytable import PrettyTable
+from pathlib import Path
+import typer
+from donut.constants import MODEL_ID
+from typing import Literal
 
 
 def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
@@ -41,76 +20,65 @@ def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
     return sizes
 
 
-def main() -> None:
-    parser = base_parser(__doc__)
-    parser.add_argument("--backends", default="eager,sdpa,fa")
-    parser.add_argument("--batch-sizes", default="1")
-    parser.add_argument(
-        "--image-sizes",
-        default="1280x960",
-        help="comma-separated HxW pairs, e.g. 640x480,960x720,1280x960. "
-        "H and W must be divisible by 40 (patch_size=4 × window_size=10) for donut-base.",
-    )
-    parser.add_argument("--max-new-tokens", type=int, default=32)
-    parser.add_argument(
-        "--gen-mode",
-        choices=["fixed", "eos"],
-        default="fixed",
-        help="fixed: always emit max-new-tokens (clean per-step timing). "
-        "eos: stop at EOS, capped by max-new-tokens (content-dependent length).",
-    )
-    parser.add_argument(
-        "--n-runs",
-        type=int,
-        default=10,
-        help="override runs for encoder AND generate",
-    )
-    parser.add_argument("--n-warmup", type=int, default=None, help="override warmups")
-    args = parser.parse_args()
+app = typer.Typer()
 
-    batch_sizes = [int(b) for b in args.batch_sizes.split(",")]
-    backends = [b.strip() for b in args.backends.split(",") if b.strip()]
-    image_sizes = _parse_image_sizes(args.image_sizes)
 
-    model, model_id = load_baseline_model(args)
-    meta = run_meta(args, model_id)
+@app.command()
+def main(
+    model_id: str = MODEL_ID,
+    device: str = "cuda",
+    dtype=Literal["bf16", "f16", "f32"],
+    seed: int = 42,
+    out: Path = Path("results"),
+    tiny: bool = False,
+    backends: str = "eager,sdpa,fa",
+    image_sizes: str = "1280x960",
+    batch_sizes: str = "1",
+    max_new_tokens: int = 32,
+    gen_mode: Literal["fixed", "eos"] = "fixed",
+    n_runs: int = 10,
+    n_warmup: int = 3,
+) -> None:
 
-    def measure(backend: str, h: int, w: int, bs: int) -> dict:
-        """One (backend, batch_size) measurement, OOM-safe.
+    batch_sizes = [int(b) for b in batch_sizes.split(",")]
+    backends = [b.strip() for b in backends.split(",") if b.strip()]
+    image_sizes = _parse_image_sizes(image_sizes)
 
-        On CUDA OOM the GPU cache is freed and a status:"oom" row (no timings) is
-        returned, so a wide sweep records the limit and keeps going.
-        """
-        base = {
-            "image_height": h,
-            "image_width": w,
-            "backend": backend,
-            "batch_size": bs,
-            "gen_mode": args.gen_mode,
-        }
-        enc = bench_encoder(
-            model,
-            batch_size=bs,
-            n_warmup=args.n_warmup,
-            n_runs=args.n_runs,
-            seed=args.seed,
+    model, model_id = load_baseline_model(model_id, device, dtype, tiny)
+
+    def bench_at_size(backend: str, h: int, w: int, bs: int) -> dict:
+        rows = []
+        for bs in batch_sizes:
+            enc = bench_encoder(
+                model,
+                batch_size=bs,
+                n_warmup=n_warmup,
+                n_runs=n_runs,
+                seed=seed,
+            )
+            gen = bench_generate(
+                model,
+                batch_size=bs,
+                max_new_tokens=max_new_tokens,
+                gen_mode=gen_mode,
+                n_warmup=n_warmup,
+                n_runs=n_runs,
+                seed=seed,
+            )
+
+        rows.append(
+            {
+                "image_height": h,
+                "image_width": w,
+                "backend": backend,
+                "batch_size": bs,
+                "gen_mode": gen_mode,
+                "status": "ok",
+                "encoder": enc,
+                "generate": gen,
+            }
         )
-        gen = bench_generate(
-            model,
-            batch_size=bs,
-            max_new_tokens=args.max_new_tokens,
-            gen_mode=args.gen_mode,
-            n_warmup=args.n_warmup,
-            n_runs=args.n_runs,
-            seed=args.seed,
-        )
-
-        return {
-            **base,
-            "status": "ok",
-            "encoder": enc,
-            "generate": gen,
-        }
+        return rows
 
     records = []
 
@@ -121,18 +89,18 @@ def main() -> None:
         # (size-agnostic) and shifted-window masks are recomputed from feature-map shape.
         model.encoder.config.image_size = [h, w]
 
-        size_records = [measure("baseline", h, w, bs) for bs in batch_sizes]
+        size_records = bench_at_size("baseline", h=h, w=w)
         for backend in backends:
             apply_accel(model, backend)
             check_accel(model, backend)
-            size_records.extend(measure(backend, h, w, bs) for bs in batch_sizes)
+            size_records.extend(bench_at_size(backend, h=h, w=w))
             revert_accel(model)
 
         records.extend(size_records)
 
     save_json(
-        args.out / "bench_speed.json",
-        {"meta": run_meta(args, model_id), "records": records},
+        out / "bench_speed.json",
+        {"meta": run_meta(device, dtype, model_id), "records": records},
     )
     table = PrettyTable()
     table.field_names = ["size", "backend", "bs", "enc ms", "gen ms", "tok/S"]
@@ -154,4 +122,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    app()

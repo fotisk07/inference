@@ -8,6 +8,7 @@ dependencies = [
     "prettytable>=3.17.0",
     "torch>=2.11.0",
     "transformers>=5.12.0",
+    "typer>=0.25.1",
 ]
 
 [project.optional-dependencies]

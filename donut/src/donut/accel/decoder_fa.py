@@ -35,4 +35,4 @@ def revert_decoder_fa(model) -> None:
 def check_decoder_fa(model) -> None:
     """Assert the decoder dispatches to a flash-attention implementation."""
     impl = model.decoder.config._attn_implementation
-    assert impl == "flash_attention_4"(f"Decoder attn_implementation is {impl!r}")
+    assert impl == "flash_attention_4", f"Decoder attn_implementation is {impl!r}"

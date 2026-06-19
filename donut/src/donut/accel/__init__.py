@@ -31,6 +31,7 @@ from donut.accel.encoder_sdpa import (
     revert_encoder_sdpa,
 )
 from donut.accel.mask_cache import apply_mask_cache, check_mask_cache, revert_mask_cache
+from donut.accel.sdpa_backend import sdpa_backend
 
 Step = tuple[Callable, Callable, Callable]  # (apply, revert, check)
 
@@ -97,4 +98,5 @@ __all__ = [
     "check_accel",
     "fa_available",
     "revert_accel",
+    "sdpa_backend",
 ]

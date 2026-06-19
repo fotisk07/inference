@@ -46,7 +46,7 @@ def main(
 
     model, model_id = load_baseline_model(model_id, device, dtype, tiny)
 
-    def bench_at_size(backend: str, h: int, w: int, bs: int) -> dict:
+    def bench_at_size(backend: str, h: int, w: int) -> dict:
         rows = []
         for bs in batch_sizes:
             enc = bench_encoder(

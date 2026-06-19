@@ -1,9 +1,7 @@
 """Shared CLI plumbing for the audit/bench scripts."""
 
-import argparse
 import csv
 import json
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,8 +13,6 @@ from donut.model import load_model
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 
 
-
-
 def resolve_device_dtype(device, dtype) -> tuple[str, torch.dtype]:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if dtype:
@@ -26,7 +22,9 @@ def resolve_device_dtype(device, dtype) -> tuple[str, torch.dtype]:
     return device, dtype
 
 
-def load_baseline_model(model_id, device:str, dtype:str, tiny:bool = False) -> tuple[torch.nn.Module, str]:
+def load_baseline_model(
+    model_id, device: str, dtype: str, tiny: bool = False
+) -> tuple[torch.nn.Module, str]:
     """Load the model with NO accelerations applied. Returns (model, model_id)."""
     device, dtype = resolve_device_dtype(device, dtype)
     if tiny:
@@ -36,15 +34,12 @@ def load_baseline_model(model_id, device:str, dtype:str, tiny:bool = False) -> t
         model_id = "tiny-random-donut"
     else:
         model_id = model_id or MODEL_ID
-        model,_ = load_model(model_id, device, dtype, backend="baseline")
+        model, _ = load_model(model_id, device, dtype, backend="baseline")
         model.to(device)
     return model.eval(), model_id
 
 
-
-
-
-def run_meta(device:str, dtype:str, model_id: str) -> dict:
+def run_meta(device: str, dtype: str, model_id: str) -> dict:
     device, dtype = resolve_device_dtype(device, dtype)
     return {
         "model_id": model_id,

@@ -1,14 +1,15 @@
 """Speed benchmarking helpers using synthetic tensors.
 
 No real images or dataset downloads required. All functions return dicts
-suitable for JSON serialization or pandas. The backend sweep lives in
-scripts/bench_speed.py.
+suitable for JSON serialization or pandas. bench_one_config is the atomic
+per-config unit; the grid sweep over configs lives in scripts/bench_speed.py.
 """
 
 import time
 
 import torch
 
+from donut.accel import apply_accel, check_accel, revert_accel
 from donut.synthetic import make_decoder_input_ids, make_pixel_values
 
 
@@ -47,6 +48,8 @@ def time_fn(fn, n_warmup: int, n_runs: int, verbose=True) -> dict:
     if verbose:
         res["times"] = times_ms
 
+    return res
+
 
 def bench_encoder(
     model,
@@ -64,7 +67,7 @@ def bench_encoder(
             model.encoder(pixel_values, return_dict=True)
 
     stats = time_fn(fn, n_warmup, n_runs)
-    stats["mean img/s"] = round(stats["mean_ms"] / batch_size, 3)
+    stats["images_per_s"] = round(1000 / stats["mean_ms"] * batch_size, 3)
 
     return stats
 
@@ -119,6 +122,64 @@ def bench_generate(
 
     stats = time_fn(fn, n_warmup, n_runs)
     stats["new_tokens"] = new_tokens
-    stats["mean tok/s"] = round(1000 / stats["mean_ms"] * new_tokens * batch_size, 3)
+    stats["tokens_per_s"] = round(1000 / stats["mean_ms"] * new_tokens * batch_size, 3)
 
     return stats
+
+
+def bench_one_config(
+    model,
+    *,
+    backend: str,
+    h: int,
+    w: int,
+    batch_size: int,
+    max_new_tokens: int,
+    gen_mode: str = "fixed",
+    n_runs: int = 10,
+    n_warmup: int = 3,
+    seed: int = 42,
+) -> dict:
+    """Benchmark exactly one (backend, size, batch, max_new_tokens) combo.
+
+    Self-contained: applies the backend, runs encoder + generate timing, and
+    always reverts before returning -- even on failure -- so a caller can loop
+    this over many configs on one shared model without state leaking between
+    iterations. Errors are caught and reported as a "error" status record
+    instead of raising, so one bad config doesn't abort a whole sweep.
+    """
+    model.encoder.config.image_size = [h, w]
+    config = {
+        "backend": backend,
+        "image_height": h,
+        "image_width": w,
+        "batch_size": batch_size,
+        "max_new_tokens": max_new_tokens,
+        "gen_mode": gen_mode,
+    }
+    try:
+        apply_accel(model, backend)
+        check_accel(model, backend)
+        encoder = bench_encoder(
+            model, batch_size=batch_size, n_warmup=n_warmup, n_runs=n_runs, seed=seed
+        )
+        generate = bench_generate(
+            model,
+            batch_size=batch_size,
+            max_new_tokens=max_new_tokens,
+            gen_mode=gen_mode,
+            n_warmup=n_warmup,
+            n_runs=n_runs,
+            seed=seed,
+        )
+        return {**config, "status": "ok", "encoder": encoder, "generate": generate}
+    except Exception as e:
+        return {
+            **config,
+            "status": "error",
+            "error": str(e),
+            "encoder": None,
+            "generate": None,
+        }
+    finally:
+        revert_accel(model)

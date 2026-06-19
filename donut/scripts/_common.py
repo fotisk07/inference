@@ -67,7 +67,6 @@ def save_record(out_dir: Path, name: str, obj) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / name
     path.write_text(json.dumps(obj, indent=2))
-    print(f"wrote {path}")
 
 
 def save_csv(path: Path, rows: list[dict]) -> None:

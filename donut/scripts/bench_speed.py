@@ -1,12 +1,19 @@
-from _common import load_baseline_model, run_meta, save_json
-
-from donut.accel import apply_accel, check_accel, revert_accel
-from donut.bench import bench_encoder, bench_generate
-from prettytable import PrettyTable
+import itertools
+import json
 from pathlib import Path
-import typer
-from donut.constants import MODEL_ID
 from typing import Literal
+
+import typer
+from prettytable import PrettyTable
+from tqdm import tqdm
+
+from _common import load_baseline_model, run_meta, save_record
+from donut.bench import bench_one_config
+from donut.constants import MODEL_ID
+
+
+def _parse_ints(s: str) -> list[int]:
+    return [int(tok.strip()) for tok in s.split(",") if tok.strip()]
 
 
 def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
@@ -20,6 +27,12 @@ def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
     return sizes
 
 
+def _filename(
+    backend: str, h: int, w: int, batch_size: int, max_new_tokens: int
+) -> str:
+    return f"{backend}__{h}x{w}__bs{batch_size}__mnt{max_new_tokens}.json"
+
+
 app = typer.Typer()
 
 
@@ -29,96 +42,88 @@ def main(
     device: str = "cuda",
     dtype: Literal["bf16", "f16", "f32"] = "bf16",
     seed: int = 42,
-    out: Path = Path("results"),
+    out: Path = Path("results/bench_speed"),
     tiny: bool = False,
-    backends: str = "eager,sdpa,fa",
+    backends: str = "baseline,eager,sdpa,fa",
     image_sizes: str = "1280x960",
     batch_sizes: str = "1",
-    max_new_tokens: int = 32,
+    max_new_tokens: str = "32",
     gen_mode: Literal["fixed", "eos"] = "fixed",
     n_runs: int = 10,
     n_warmup: int = 3,
+    force: bool = False,
 ) -> None:
-
-    batch_sizes = [int(b) for b in batch_sizes.split(",")]
-    backends = [b.strip() for b in backends.split(",") if b.strip()]
-    image_sizes = _parse_image_sizes(image_sizes)
+    backends_list = [b.strip() for b in backends.split(",") if b.strip()]
+    image_sizes_list = _parse_image_sizes(image_sizes)
+    batch_sizes_list = _parse_ints(batch_sizes)
+    max_new_tokens_list = _parse_ints(max_new_tokens)
 
     model, model_id = load_baseline_model(model_id, device, dtype, tiny)
+    meta = run_meta(device, dtype, model_id)
 
-    def bench_at_size(backend: str, h: int, w: int) -> dict:
-        rows = []
-        for bs in batch_sizes:
-            enc = bench_encoder(
-                model,
-                batch_size=bs,
-                n_warmup=n_warmup,
-                n_runs=n_runs,
-                seed=seed,
-            )
-            gen = bench_generate(
-                model,
-                batch_size=bs,
-                max_new_tokens=max_new_tokens,
-                gen_mode=gen_mode,
-                n_warmup=n_warmup,
-                n_runs=n_runs,
-                seed=seed,
-            )
-
-        rows.append(
-            {
-                "image_height": h,
-                "image_width": w,
-                "backend": backend,
-                "batch_size": bs,
-                "gen_mode": gen_mode,
-                "status": "ok",
-                "encoder": enc,
-                "generate": gen,
-            }
+    combos = list(
+        itertools.product(
+            backends_list, image_sizes_list, batch_sizes_list, max_new_tokens_list
         )
-        return rows
-
+    )
     records = []
+    progress = tqdm(combos, desc="bench grid")
+    for backend, (h, w), bs, mnt in progress:
+        name = _filename(backend, h, w, bs, mnt)
+        progress.set_postfix_str(name)
+        path = out / name
+        if path.exists() and not force:
+            tqdm.write(f"skip (exists): {name}")
+            records.append(json.loads(path.read_text()))
+            continue
 
-    for h, w in image_sizes:
-        print(f"\n--- image size {h}x{w} ---")
-        # Temporarily override config so make_pixel_values uses the correct shape.
-        # Swin handles variable image sizes: relative position bias is per-window
-        # (size-agnostic) and shifted-window masks are recomputed from feature-map shape.
-        model.encoder.config.image_size = [h, w]
+        record = bench_one_config(
+            model,
+            backend=backend,
+            h=h,
+            w=w,
+            batch_size=bs,
+            max_new_tokens=mnt,
+            gen_mode=gen_mode,
+            n_runs=n_runs,
+            n_warmup=n_warmup,
+            seed=seed,
+        )
+        save_record(out, name, {**meta, **record})
+        records.append(record)
 
-        size_records = bench_at_size("baseline", h=h, w=w)
-        for backend in backends:
-            apply_accel(model, backend)
-            check_accel(model, backend)
-            size_records.extend(bench_at_size(backend, h=h, w=w))
-            revert_accel(model)
-
-        records.extend(size_records)
-
-    save_json(
-        out / "bench_speed.json",
-        {"meta": run_meta(device, dtype, model_id), "records": records},
-    )
     table = PrettyTable()
-    table.field_names = ["size", "backend", "bs", "enc ms", "img/s", "gen ms", "tok/S"]
-    table.add_rows(
-        [
-            [
-                f"{r['image_height']}x{r['image_width']}",
-                r["backend"],
-                r["batch_size"],
-                r["encoder"]["mean_ms"],
-                r["encoder"]["mean img/s"],
-                r["generate"]["mean_ms"],
-                r["generate"]["mean_ms"],
-                r["generate"]["mean tok/s"],
-            ]
-            for r in records
+    table.field_names = [
+        "size",
+        "backend",
+        "bs",
+        "mnt",
+        "status",
+        "enc ms",
+        "img/s",
+        "gen ms",
+        "tok/s",
+    ]
+    for r in records:
+        row_key = [
+            f"{r['image_height']}x{r['image_width']}",
+            r["backend"],
+            r["batch_size"],
+            r["max_new_tokens"],
         ]
-    )
+        if r["status"] == "ok":
+            table.add_row(
+                [
+                    *row_key,
+                    r["status"],
+                    r["encoder"]["mean_ms"],
+                    r["encoder"]["images_per_s"],
+                    r["generate"]["mean_ms"],
+                    r["generate"]["tokens_per_s"],
+                ]
+            )
+        else:
+            table.add_row([*row_key, "ERROR", "-", "-", "-", "-"])
     print(table)
 
 

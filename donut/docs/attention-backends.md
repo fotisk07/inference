@@ -28,21 +28,31 @@ module with three functions:
 
 A **preset** (`PRESETS` dict in `src/donut/accel/__init__.py`) is just a
 named list of these steps applied together. `--backends` in
-`scripts/bench_speed.py` picks which presets to benchmark. There are five:
+`scripts/bench_speed.py` picks which presets to benchmark. There are eight:
 
 | preset | encoder kernel | decoder kernel |
 |---|---|---|
 | `baseline` | eager (plain PyTorch ops, nothing patched) | eager |
 | `eager` | eager + cached attention-mask bias (`mask_cache.py`) | eager |
 | `sdpa` | SDPA, auto-picked backend | SDPA, auto-picked backend |
+| `sdpa_flash` | SDPA, auto-picked backend | SDPA, **strictly flash only** |
+| `sdpa_math` | SDPA, auto-picked backend | SDPA, **strictly math only** |
+| `sdpa_efficient` | SDPA, auto-picked backend | SDPA, **strictly efficient only** |
 | `sdpa_cudnn` | SDPA, auto-picked backend | SDPA, **cuDNN preferred, efficient as fallback** |
 | `fa` | SDPA, auto-picked backend | the actual FlashAttention-4 kernel |
 
 The encoder (DonutSwin) has no flash-attention path at all — it's a legacy
-class with its own hand-written attention, so `"sdpa"` and `"fa"` both patch
-it the same way (`encoder_sdpa.py`). The only thing that changes between
-`sdpa` / `sdpa_cudnn` / `fa` is **which kernel the decoder uses**. That's
-intentional: it isolates the decoder-kernel comparison from everything else.
+class with its own hand-written attention, so all of these patch it the same
+way (`encoder_sdpa.py`). The only thing that changes between the `sdpa*`
+presets and `fa` is **which kernel the decoder uses**. That's intentional:
+it isolates the decoder-kernel comparison from everything else — bracketing
+plain `sdpa`'s auto-dispatch with every backend it could have individually
+picked, to see exactly what it's doing differently.
+
+`sdpa_flash`/`sdpa_math`/`sdpa_efficient` are strict, single-backend, no
+fallback — the H100 kernel sweep below showed all three handle every shape
+tested, including `kv_len=1` decode. `sdpa_cudnn` is the one exception (see
+below) because cuDNN alone can't handle `kv_len=1` at all.
 
 ## SDPA backends: math / efficient / flash / cudnn
 
@@ -134,9 +144,51 @@ sweet spot (long-sequence, compute-bound, lots of query-side parallelism)
 simply doesn't overlap with what Donut's `generate()` actually does
 (decode-bound, `query_len=1` every step). Paying for FA4's kernel complexity
 buys nothing in that regime, and can lose to simpler kernels on launch
-overhead alone. `sdpa_cudnn` is the more promising decoder kernel for this
-specific workload based on this data — that's why it's now a fifth preset
-(`--backends ...,sdpa_cudnn,...` in `bench_speed.py`).
+overhead alone. cuDNN looked like the standout in this isolated sweep, which
+is why it became a preset (`sdpa_cudnn`, `decoder_sdpa.py`) — see below for
+whether that held up in the full model.
+
+## Full-model confirmation (`bench_speed.py`, real image size)
+
+This run predates `sdpa_flash`/`sdpa_math`/`sdpa_efficient` (added
+afterward, once plain `sdpa` turned out to beat `sdpa_cudnn` below, to
+bracket exactly what auto-dispatch is doing) — only `baseline`, `eager`,
+`sdpa`, `sdpa_cudnn`, and `fa` existed at the time. Rerunning with all eight
+presets on the H100 is the natural next step; results pending.
+
+Running the actual model end-to-end (`naver-clova-ix/donut-base`, image
+2560x1920, `max_new_tokens=32`) across batch sizes 1/2/4/8 confirms the
+decode-regime finding directly: `fa`'s `generate()` latency ties or *loses*
+to plain `eager` at bs=1-2 (gen ms: `fa`=145.4 vs `eager`=137.9 at bs=1;
+145.3 vs 166.3 — fa barely ahead — at bs=2), only clearly pulling ahead once
+bs≥4. Exactly the behavior originally reported on H100.
+
+The bigger surprise: plain `sdpa` (untouched auto-dispatch) beat *every*
+other preset, including the new `sdpa_cudnn`, at every batch size tested:
+
+| bs | sdpa tok/s | sdpa_cudnn tok/s | fa tok/s |
+|---|---|---|---|
+| 1 | 274.2 | 263.0 | 220.2 |
+| 2 | 465.4 | 444.1 | 387.1 |
+| 4 | 729.8 | 722.7 | 625.5 |
+| 8 | 1018.2 | 1000.0 | 900.0 |
+
+`sdpa_cudnn` is consistently ~2-5% *slower* than unrestricted `sdpa`, despite
+cuDNN winning lots of isolated-kernel rows in the sweep above. Most likely
+explanation: real `generate()` mixes many different small `kv_len` values
+(1→32) across the 32 decode steps, and `sdpa_cudnn`'s priority list
+(`[CUDNN_ATTENTION, EFFICIENT_ATTENTION]`) excludes `FLASH_ATTENTION` —
+which the unrestricted heuristic is free to pick per-call and which was
+competitive at the smallest `kv_len` rows earlier. Restricting the
+candidate set removed an option that was sometimes the right one.
+
+**Practical takeaway**: use plain `"sdpa"` for this model on H100 — it's
+both the simplest config and the fastest one measured. `sdpa_cudnn` is kept
+as a preset (it's a legitimate, useful comparison point and the cudnn
+backend genuinely wins in some regimes), but it isn't a clear win here.
+`sdpa_flash`/`sdpa_math`/`sdpa_efficient` now exist specifically to settle
+this properly — run all eight presets together and see which single backend
+plain `sdpa`'s auto-dispatch is actually converging to, rather than guessing.
 
 ## Where to look for more
 

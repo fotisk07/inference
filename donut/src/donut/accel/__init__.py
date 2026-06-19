@@ -23,10 +23,19 @@ from donut.accel.decoder_fa import (
 from donut.accel.decoder_sdpa import (
     apply_decoder_sdpa,
     apply_decoder_sdpa_cudnn,
+    apply_decoder_sdpa_efficient,
+    apply_decoder_sdpa_flash,
+    apply_decoder_sdpa_math,
     check_decoder_sdpa,
     check_decoder_sdpa_cudnn,
+    check_decoder_sdpa_efficient,
+    check_decoder_sdpa_flash,
+    check_decoder_sdpa_math,
     revert_decoder_sdpa,
     revert_decoder_sdpa_cudnn,
+    revert_decoder_sdpa_efficient,
+    revert_decoder_sdpa_flash,
+    revert_decoder_sdpa_math,
 )
 from donut.accel.encoder_sdpa import (
     apply_encoder_sdpa,
@@ -46,18 +55,36 @@ DECODER_SDPA_CUDNN: Step = (
     revert_decoder_sdpa_cudnn,
     check_decoder_sdpa_cudnn,
 )
+DECODER_SDPA_FLASH: Step = (
+    apply_decoder_sdpa_flash,
+    revert_decoder_sdpa_flash,
+    check_decoder_sdpa_flash,
+)
+DECODER_SDPA_MATH: Step = (
+    apply_decoder_sdpa_math,
+    revert_decoder_sdpa_math,
+    check_decoder_sdpa_math,
+)
+DECODER_SDPA_EFFICIENT: Step = (
+    apply_decoder_sdpa_efficient,
+    revert_decoder_sdpa_efficient,
+    check_decoder_sdpa_efficient,
+)
 DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
 
 # Mask caching is always first (universally beneficial; the SDPA encoder patch
-# consumes its cached bias). Note "sdpa", "sdpa_cudnn", and "fa" all use the SAME
+# consumes its cached bias). Note "sdpa" and all "sdpa_*" presets use the SAME
 # ENCODER_SDPA step — DonutSwin has no flash path — so they differ ONLY in the
-# decoder kernel: a clean decoder-only comparison ("fa"/"sdpa_cudnn" vs "eager"
-# moves both the encoder and decoder kernel).
+# decoder kernel: a clean decoder-only comparison (vs "fa"/"eager", which move
+# both the encoder and decoder kernel).
 PRESETS: dict[str, list[Step]] = {
     "baseline": [],
     "eager": [MASK_CACHE],
     "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
     "sdpa_cudnn": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_CUDNN],
+    "sdpa_flash": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_FLASH],
+    "sdpa_math": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_MATH],
+    "sdpa_efficient": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_EFFICIENT],
     "fa": [MASK_CACHE, ENCODER_SDPA, DECODER_FA],
 }
 
@@ -101,6 +128,9 @@ __all__ = [
     "DECODER_FA",
     "DECODER_SDPA",
     "DECODER_SDPA_CUDNN",
+    "DECODER_SDPA_EFFICIENT",
+    "DECODER_SDPA_FLASH",
+    "DECODER_SDPA_MATH",
     "ENCODER_SDPA",
     "MASK_CACHE",
     "PRESETS",

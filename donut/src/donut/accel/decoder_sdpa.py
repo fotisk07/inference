@@ -6,10 +6,9 @@ Only ever assign on model.decoder.config — in transformers v5 the top-level
 config setter recursively touches sub-configs.
 """
 
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
-
-from donut.accel.sdpa_backend import sdpa_backend
 
 
 def apply_decoder_sdpa(model) -> None:
@@ -35,8 +34,15 @@ def check_decoder_sdpa(model) -> None:
     assert impl == "sdpa", f"Decoder attn_implementation is {impl!r}, expected 'sdpa'"
 
 
+_CUDNN_PREFERRED = [SDPBackend.CUDNN_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+
+
 def _sdpa_cudnn_attention_forward(module, query, key, value, attention_mask, **kwargs):
-    with sdpa_backend("cudnn"):
+    # cuDNN's SDPA backend can't handle kv_len=1 (RuntimeError) -- and generate()'s
+    # first decode step always has kv_len=1 before the cache grows. set_priority=True
+    # means: prefer cuDNN whenever it can handle the shape, transparently fall back to
+    # the efficient backend otherwise (it handled every shape in the H100 sweep).
+    with sdpa_kernel(_CUDNN_PREFERRED, set_priority=True):
         return sdpa_attention_forward(
             module, query, key, value, attention_mask, **kwargs
         )

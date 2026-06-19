@@ -35,7 +35,7 @@ named list of these steps applied together. `--backends` in
 | `baseline` | eager (plain PyTorch ops, nothing patched) | eager |
 | `eager` | eager + cached attention-mask bias (`mask_cache.py`) | eager |
 | `sdpa` | SDPA, auto-picked backend | SDPA, auto-picked backend |
-| `sdpa_cudnn` | SDPA, auto-picked backend | SDPA, **forced to the cuDNN backend** |
+| `sdpa_cudnn` | SDPA, auto-picked backend | SDPA, **cuDNN preferred, efficient as fallback** |
 | `fa` | SDPA, auto-picked backend | the actual FlashAttention-4 kernel |
 
 The encoder (DonutSwin) has no flash-attention path at all — it's a legacy
@@ -63,11 +63,24 @@ of several backends based on input shape/dtype/mask:
   GPUs (H100 qualifies).
 
 Normally PyTorch auto-picks one of these per call based on the shapes
-involved, and you can't easily tell which one it picked. `donut.accel.sdpa_backend(name)`
-(`src/donut/accel/sdpa_backend.py`) is a context manager that *forces* one
-specific backend for whatever call it wraps — `"math"`, `"efficient"`,
-`"flash"`, or `"cudnn"`. The `sdpa_cudnn` preset uses it to pin the decoder
-to cuDNN specifically, instead of trusting the auto heuristic.
+involved, and you can't easily tell which one it picked.
+`donut.accel.sdpa_backend(name)` (`src/donut/accel/sdpa_backend.py`) is a
+context manager that *restricts* SDPA to exactly one named backend for
+whatever call it wraps — `"math"`, `"efficient"`, `"flash"`, or `"cudnn"`.
+`scripts/bench_attention_kernels.py` uses it this way deliberately, to
+isolate one kernel at a time — including watching it fail when a backend
+genuinely can't handle a shape (see below).
+
+The `sdpa_cudnn` preset does *not* use that strict single-backend form.
+cuDNN's SDPA backend can't handle `kv_len=1`, and `generate()`'s first
+decode step always starts at `kv_len=1` before the cache grows — a hard
+cudnn-only restriction crashes on the very first token of every
+generation. Instead, `decoder_sdpa.py` calls
+`sdpa_kernel([CUDNN_ATTENTION, EFFICIENT_ATTENTION], set_priority=True)`
+directly: prefer cuDNN whenever it can handle the shape, fall through to
+the efficient backend otherwise. Efficient was chosen as the fallback
+because it had zero failures anywhere in the H100 sweep below, including
+`kv_len=1`.
 
 ## decode vs prefill: why they're completely different workloads
 
@@ -127,10 +140,12 @@ specific workload based on this data — that's why it's now a fifth preset
 
 ## Where to look for more
 
-- `src/donut/accel/sdpa_backend.py` — the backend-forcing context manager.
+- `src/donut/accel/sdpa_backend.py` — the strict single-backend context
+  manager, used by `bench_attention_kernels.py` for isolation.
 - `src/donut/accel/decoder_sdpa.py` — `sdpa_cudnn` preset implementation
   (registers a custom `transformers` `AttentionInterface` entry that wraps
-  the standard SDPA dispatch in the forced-backend context manager).
+  the standard SDPA dispatch in a cudnn-preferred, efficient-fallback
+  priority list).
 - `scripts/bench_attention_kernels.py` — the isolated kernel-level sweep
   that produced the numbers above; rerun with different `--kv-lens
   --batch-sizes --modes` to probe other shapes.

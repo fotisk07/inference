@@ -44,7 +44,7 @@ def main(
     seed: int = 42,
     out: Path = Path("results/bench_speed"),
     tiny: bool = False,
-    backends: str = "baseline,eager,sdpa,fa",
+    backends: str = "baseline,eager,sdpa,sdpa_cudnn,fa",
     image_sizes: str = "1280x960",
     batch_sizes: str = "1",
     max_new_tokens: str = "32",

@@ -22,8 +22,11 @@ from donut.accel.decoder_fa import (
 )
 from donut.accel.decoder_sdpa import (
     apply_decoder_sdpa,
+    apply_decoder_sdpa_cudnn,
     check_decoder_sdpa,
+    check_decoder_sdpa_cudnn,
     revert_decoder_sdpa,
+    revert_decoder_sdpa_cudnn,
 )
 from donut.accel.encoder_sdpa import (
     apply_encoder_sdpa,
@@ -38,16 +41,23 @@ Step = tuple[Callable, Callable, Callable]  # (apply, revert, check)
 MASK_CACHE: Step = (apply_mask_cache, revert_mask_cache, check_mask_cache)
 ENCODER_SDPA: Step = (apply_encoder_sdpa, revert_encoder_sdpa, check_encoder_sdpa)
 DECODER_SDPA: Step = (apply_decoder_sdpa, revert_decoder_sdpa, check_decoder_sdpa)
+DECODER_SDPA_CUDNN: Step = (
+    apply_decoder_sdpa_cudnn,
+    revert_decoder_sdpa_cudnn,
+    check_decoder_sdpa_cudnn,
+)
 DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
 
 # Mask caching is always first (universally beneficial; the SDPA encoder patch
-# consumes its cached bias). Note both "sdpa" and "fa" use the SAME ENCODER_SDPA
-# step — DonutSwin has no flash path — so they differ ONLY in the decoder kernel:
-# "fa" vs "sdpa" is a clean decoder-only comparison; "fa" vs "eager" moves both.
+# consumes its cached bias). Note "sdpa", "sdpa_cudnn", and "fa" all use the SAME
+# ENCODER_SDPA step — DonutSwin has no flash path — so they differ ONLY in the
+# decoder kernel: a clean decoder-only comparison ("fa"/"sdpa_cudnn" vs "eager"
+# moves both the encoder and decoder kernel).
 PRESETS: dict[str, list[Step]] = {
     "baseline": [],
     "eager": [MASK_CACHE],
     "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
+    "sdpa_cudnn": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_CUDNN],
     "fa": [MASK_CACHE, ENCODER_SDPA, DECODER_FA],
 }
 
@@ -90,6 +100,7 @@ def check_accel(model, backend: str = "sdpa") -> None:
 __all__ = [
     "DECODER_FA",
     "DECODER_SDPA",
+    "DECODER_SDPA_CUDNN",
     "ENCODER_SDPA",
     "MASK_CACHE",
     "PRESETS",

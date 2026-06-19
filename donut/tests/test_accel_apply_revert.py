@@ -5,7 +5,7 @@ import torch
 
 from donut.accel import apply_accel, check_accel, revert_accel
 
-BACKENDS = ["eager", "sdpa"]  # "fa" needs CUDA + flash-attn; covered on GPU box
+BACKENDS = ["eager", "sdpa"]  # "fa"/"sdpa_cudnn" need CUDA; covered on GPU box
 
 
 @torch.no_grad()

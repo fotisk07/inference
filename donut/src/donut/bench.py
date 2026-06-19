@@ -63,7 +63,10 @@ def bench_encoder(
         with torch.no_grad():
             model.encoder(pixel_values, return_dict=True)
 
-    return time_fn(fn, n_warmup, n_runs)
+    stats = time_fn(fn, n_warmup, n_runs)
+    stats["mean img/s"] = round(stats["mean_ms"] / batch_size, 3)
+
+    return stats
 
 
 def bench_generate(
@@ -96,7 +99,7 @@ def bench_generate(
         pad_id = model.config.decoder.eos_token_id
     min_new_tokens = max_new_tokens if gen_mode == "fixed" else 1
 
-    def run():
+    def fn():
         with torch.no_grad():
             return model.generate(
                 pixel_values=pixel_values,
@@ -111,11 +114,11 @@ def bench_generate(
     if gen_mode == "fixed":
         new_tokens = float(max_new_tokens)
     else:
-        out = run()
+        out = fn()
         new_tokens = round(out.shape[1] - prompt_len, 2)
 
-    stats = time_fn(run, n_warmup, n_runs)
+    stats = time_fn(fn, n_warmup, n_runs)
     stats["new_tokens"] = new_tokens
-    stats["mean tok/s"] = round(1000 / stats["mean_ms"] * new_tokens, 3)
+    stats["mean tok/s"] = round(1000 / stats["mean_ms"] * new_tokens * batch_size, 3)
 
     return stats

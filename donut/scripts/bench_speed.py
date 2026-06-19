@@ -103,7 +103,7 @@ def main(
         {"meta": run_meta(device, dtype, model_id), "records": records},
     )
     table = PrettyTable()
-    table.field_names = ["size", "backend", "bs", "enc ms", "gen ms", "tok/S"]
+    table.field_names = ["size", "backend", "bs", "enc ms", "img/s", "gen ms", "tok/S"]
     table.add_rows(
         [
             [
@@ -111,6 +111,7 @@ def main(
                 r["backend"],
                 r["batch_size"],
                 r["encoder"]["mean_ms"],
+                r["encoder"]["mean img/s"],
                 r["generate"]["mean_ms"],
                 r["generate"]["mean_ms"],
                 r["generate"]["mean tok/s"],

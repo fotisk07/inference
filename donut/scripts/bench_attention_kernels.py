@@ -12,6 +12,7 @@ attention is designed for).
 """
 
 import itertools
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -19,6 +20,7 @@ import torch.nn.functional as F
 import typer
 from prettytable import PrettyTable
 
+from _common import save_record
 from donut.accel import sdpa_backend
 from donut.bench import time_fn
 
@@ -79,6 +81,7 @@ def main(
     n_runs: int = 20,
     n_warmup: int = 5,
     seed: int = 42,
+    out: Path | None = None,
 ) -> None:
     torch_dtype = DTYPES[dtype]
     kv_len_list = _parse_ints(kv_lens)
@@ -88,6 +91,7 @@ def main(
 
     table = PrettyTable()
     table.field_names = ["mode", "kv_len", "bs", *kernels]
+    records = []
 
     for mode, kv_len, bs in itertools.product(mode_list, kv_len_list, batch_size_list):
         q_len = 1 if mode == "decode" else kv_len
@@ -97,6 +101,7 @@ def main(
         )
 
         row = [mode, kv_len, bs]
+        rec = {"mode": mode, "kv_len": kv_len, "batch_size": bs, "kernels": {}}
         for kernel in kernels:
             try:
                 if kernel == "fa4":
@@ -105,11 +110,27 @@ def main(
                     backend = kernel.removeprefix("sdpa-")
                     stats = _bench_sdpa(q, k, v, causal, backend, n_warmup, n_runs)
                 row.append(stats["mean_ms"])
+                rec["kernels"][kernel] = {"status": "ok", "mean_ms": stats["mean_ms"]}
             except Exception as e:
                 row.append(f"n/a ({type(e).__name__})")
+                rec["kernels"][kernel] = {"status": "error", "error": type(e).__name__}
         table.add_row(row)
+        records.append(rec)
 
     print(table)
+
+    if out is not None:
+        meta = {
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "dtype": dtype,
+            "device": device,
+            "n_runs": n_runs,
+            "n_warmup": n_warmup,
+        }
+        save_record(
+            out, "bench_attention_kernels.json", {"meta": meta, "records": records}
+        )
 
 
 if __name__ == "__main__":

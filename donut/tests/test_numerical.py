@@ -6,21 +6,17 @@ belong to the audit scripts (scripts/audit_*.py), not here.
 
 import torch
 
+from conftest import encode
 from donut.accel import apply_accel
 from donut.accel.mask_cache import apply_mask_cache
 from donut.audit import eager_encoder
 
 
-@torch.no_grad()
-def _encode(model, pixel_values):
-    return model.encoder(pixel_values, return_dict=True).last_hidden_state
-
-
 def test_mask_cache_bit_exact(tiny_model, pixel_values):
     """Caching only avoids recomputation — outputs must be bit-identical."""
-    before = _encode(tiny_model, pixel_values)
+    before = encode(tiny_model, pixel_values)
     apply_mask_cache(tiny_model)
-    after = _encode(tiny_model, pixel_values)
+    after = encode(tiny_model, pixel_values)
     assert torch.equal(before, after)
 
 
@@ -45,8 +41,8 @@ def test_cached_mask_values_match_reference(tiny_model):
 def test_encoder_sdpa_close_to_eager(tiny_model, pixel_values):
     apply_accel(tiny_model, "sdpa")
     with eager_encoder(tiny_model):
-        ref = _encode(tiny_model, pixel_values)
-    accel = _encode(tiny_model, pixel_values)
+        ref = encode(tiny_model, pixel_values)
+    accel = encode(tiny_model, pixel_values)
     torch.testing.assert_close(accel, ref, atol=1e-5, rtol=1e-5)
 
 

@@ -7,15 +7,11 @@ tight tolerances.
 import pytest
 import torch
 
+from conftest import encode
 from donut.synthetic import make_decoder_input_ids
 
 N_STEPS = 10
 ATOL = RTOL = 1e-4
-
-
-@torch.no_grad()
-def _encode(model, pixel_values):
-    return model.encoder(pixel_values, return_dict=True).last_hidden_state
 
 
 @torch.no_grad()
@@ -58,14 +54,14 @@ def test_cached_vs_uncached_tokens_identical(tiny_model, pixel_values):
 
 
 def test_stepwise_logits_match_full_reforward(tiny_model, pixel_values):
-    enc = _encode(tiny_model, pixel_values)
+    enc = encode(tiny_model, pixel_values)
     _stepwise_cached_vs_full(tiny_model, enc)
 
 
 @pytest.mark.parametrize("impl", ["eager", "sdpa"])
 def test_stepwise_logits_per_decoder_impl(tiny_model, pixel_values, impl):
     tiny_model.decoder.config._attn_implementation = impl
-    enc = _encode(tiny_model, pixel_values)
+    enc = encode(tiny_model, pixel_values)
     _stepwise_cached_vs_full(tiny_model, enc)
 
 

@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from donut.synthetic import make_pixel_values, make_tiny_model
 
@@ -12,3 +13,8 @@ def tiny_model():
 @pytest.fixture
 def pixel_values(tiny_model):
     return make_pixel_values(tiny_model, batch_size=2, seed=42)
+
+
+@torch.no_grad()
+def encode(model, pixel_values):
+    return model.encoder(pixel_values, return_dict=True).last_hidden_state

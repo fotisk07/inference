@@ -101,8 +101,10 @@ def main(
         "status",
         "enc ms",
         "img/s",
+        "enc MB",
         "gen ms",
         "tok/s",
+        "gen MB",
     ]
     for r in records:
         row_key = [
@@ -118,12 +120,14 @@ def main(
                     r["status"],
                     r["encoder"]["mean_ms"],
                     r["encoder"]["images_per_s"],
+                    r["encoder"]["peak_mem_mb"],
                     r["generate"]["mean_ms"],
                     r["generate"]["tokens_per_s"],
+                    r["generate"]["peak_mem_mb"],
                 ]
             )
         else:
-            table.add_row([*row_key, "ERROR", "-", "-", "-", "-"])
+            table.add_row([*row_key, "ERROR", "-", "-", "-", "-", "-", "-"])
     print(table)
 
 

@@ -18,6 +18,23 @@ def _cuda_sync():
         torch.cuda.synchronize()
 
 
+def _peak_mem_mb(fn) -> float | None:
+    """Peak CUDA memory (MB) during one fn() call; None on CPU.
+
+    Resets the peak counter so the measurement reflects this call's high-water
+    mark (model weights are already resident, so it captures weights +
+    activations for this config). Run after warmup so allocator caching has
+    settled.
+    """
+    if not torch.cuda.is_available():
+        return None
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    fn()
+    torch.cuda.synchronize()
+    return round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+
+
 def time_fn(fn, n_warmup: int, n_runs: int, verbose=True) -> dict:
     """Run fn() n_warmup times (discarded), then n_runs times. Return latency stats."""
     for _ in range(n_warmup):
@@ -68,6 +85,7 @@ def bench_encoder(
 
     stats = time_fn(fn, n_warmup, n_runs)
     stats["images_per_s"] = round(1000 / stats["mean_ms"] * batch_size, 3)
+    stats["peak_mem_mb"] = _peak_mem_mb(fn)
 
     return stats
 
@@ -123,6 +141,7 @@ def bench_generate(
     stats = time_fn(fn, n_warmup, n_runs)
     stats["new_tokens"] = new_tokens
     stats["tokens_per_s"] = round(1000 / stats["mean_ms"] * new_tokens * batch_size, 3)
+    stats["peak_mem_mb"] = _peak_mem_mb(fn)
 
     return stats
 

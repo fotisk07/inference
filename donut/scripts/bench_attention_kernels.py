@@ -110,7 +110,11 @@ def main(
                     backend = kernel.removeprefix("sdpa-")
                     stats = _bench_sdpa(q, k, v, causal, backend, n_warmup, n_runs)
                 row.append(stats["mean_ms"])
-                rec["kernels"][kernel] = {"status": "ok", "mean_ms": stats["mean_ms"]}
+                rec["kernels"][kernel] = {
+                    "status": "ok",
+                    "mean_ms": stats["mean_ms"],
+                    "std_ms": stats["std_ms"],
+                }
             except Exception as e:
                 row.append(f"n/a ({type(e).__name__})")
                 rec["kernels"][kernel] = {"status": "error", "error": type(e).__name__}

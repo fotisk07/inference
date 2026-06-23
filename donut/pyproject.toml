@@ -32,6 +32,9 @@ analysis = [
 [tool.uv]
 package = true
 
+[tool.ty.src]
+exclude = ["notebooks"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not slow'"

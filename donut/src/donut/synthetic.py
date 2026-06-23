@@ -43,7 +43,8 @@ def make_tiny_model(seed: int = 0):
     )
 
     cfg = VisionEncoderDecoderConfig.from_encoder_decoder_configs(
-        DonutSwinConfig(**TINY_ENCODER), MBartConfig(**TINY_DECODER)
+        DonutSwinConfig(**TINY_ENCODER),  # ty: ignore[invalid-argument-type]
+        MBartConfig(**TINY_DECODER),  # ty: ignore[invalid-argument-type]
     )
     cfg.decoder_start_token_id = TINY_DECODER["bos_token_id"]
     cfg.pad_token_id = TINY_DECODER["pad_token_id"]

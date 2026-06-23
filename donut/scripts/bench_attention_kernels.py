@@ -46,7 +46,7 @@ def _make_qkv(batch_size, num_heads, q_len, kv_len, head_dim, dtype, device, see
 
 
 def _bench_fa4(q, k, v, causal: bool, n_warmup: int, n_runs: int) -> dict:
-    from flash_attn.cute import flash_attn_func
+    from flash_attn.cute import flash_attn_func  # ty: ignore[unresolved-import]
 
     def fn():
         flash_attn_func(q, k, v, causal=causal)

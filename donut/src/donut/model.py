@@ -23,7 +23,7 @@ def load_model(
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id, dtype=dtype)
-    model.to(device).eval()
+    model.to(device).eval()  # ty: ignore[invalid-argument-type]
     apply_accel(model, backend)
 
     # The pretrained checkpoint's generation_config carries a stale max_length

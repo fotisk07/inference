@@ -105,7 +105,6 @@ def main(
         "dec ms",
         "tok/s",
         "dec MB",
-        "total ms",
     ]
     for r in records:
         row_key = [
@@ -115,7 +114,6 @@ def main(
             r["max_new_tokens"],
         ]
         if r["status"] == "ok":
-            total_ms = round(r["encoder"]["mean_ms"] + r["decode"]["mean_ms"], 3)
             table.add_row(
                 [
                     *row_key,
@@ -126,11 +124,10 @@ def main(
                     r["decode"]["mean_ms"],
                     r["decode"]["tokens_per_s"],
                     r["decode"]["peak_mem_mb"],
-                    total_ms,
                 ]
             )
         else:
-            table.add_row([*row_key, "ERROR", *["-"] * 7])
+            table.add_row([*row_key, "ERROR", *["-"] * 6])
     print(table)
 
 

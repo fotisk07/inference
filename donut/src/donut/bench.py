@@ -90,26 +90,21 @@ def bench_encoder(
     return stats
 
 
-def bench_generate(
+def bench_decode(
     model,
     *,
     batch_size: int = 1,
     max_new_tokens: int = 20,
     gen_mode: str = "fixed",
-    decode_only: bool = False,
     n_warmup: int = 2,
     n_runs: int = 10,
     seed: int = 42,
 ) -> dict:
-    """Benchmark a generate() call on synthetic input.
+    """Benchmark the cached decode loop only (no encoder in the timed path).
 
-    decode_only controls what the timed call includes:
-      False -- end-to-end: pixel_values are passed, so generate() runs the
-               encoder once and then the cached decode loop. "gen ms" therefore
-               covers encoder + decoder. The default.
-      True  -- pure decode: the encoder is run once up front and its
-               encoder_outputs are passed to generate(), which then reuses them
-               and times only the cached decode loop (no encoder forward).
+    The encoder is run once up front (untimed) and its encoder_outputs are
+    passed to generate(), which reuses them, so timing covers only the decoder.
+    End-to-end generate latency, if needed, is just encoder + decode.
 
     gen_mode controls how many tokens are decoded:
       "fixed" -- always emit exactly max_new_tokens (min == max). Clean per-step
@@ -129,19 +124,13 @@ def bench_generate(
         pad_id = model.config.decoder.eos_token_id
     min_new_tokens = max_new_tokens if gen_mode == "fixed" else 1
 
-    # Pure-decode timing precomputes encoder_outputs so the timed generate()
-    # reuses them instead of re-encoding pixel_values every call.
-    if decode_only:
-        with torch.no_grad():
-            encoder_outputs = model.encoder(pixel_values, return_dict=True)
-        gen_input = {"encoder_outputs": encoder_outputs}
-    else:
-        gen_input = {"pixel_values": pixel_values}
+    with torch.no_grad():
+        encoder_outputs = model.encoder(pixel_values, return_dict=True)
 
     def fn():
         with torch.no_grad():
             return model.generate(
-                **gen_input,
+                encoder_outputs=encoder_outputs,
                 decoder_input_ids=decoder_input_ids,
                 max_new_tokens=max_new_tokens,
                 min_new_tokens=min_new_tokens,
@@ -179,7 +168,7 @@ def bench_one_config(
 ) -> dict:
     """Benchmark exactly one (backend, size, batch, max_new_tokens) combo.
 
-    Self-contained: applies the backend, runs encoder + generate timing, and
+    Self-contained: applies the backend, runs encoder + decode timing, and
     always reverts before returning -- even on failure -- so a caller can loop
     this over many configs on one shared model without state leaking between
     iterations. Errors are caught and reported as a "error" status record
@@ -212,21 +201,11 @@ def bench_one_config(
         encoder = bench_encoder(
             model, batch_size=batch_size, n_warmup=n_warmup, n_runs=n_runs, seed=seed
         )
-        generate = bench_generate(
+        decode = bench_decode(
             model,
             batch_size=batch_size,
             max_new_tokens=max_new_tokens,
             gen_mode=gen_mode,
-            n_warmup=n_warmup,
-            n_runs=n_runs,
-            seed=seed,
-        )
-        decode = bench_generate(
-            model,
-            batch_size=batch_size,
-            max_new_tokens=max_new_tokens,
-            gen_mode=gen_mode,
-            decode_only=True,
             n_warmup=n_warmup,
             n_runs=n_runs,
             seed=seed,
@@ -235,7 +214,6 @@ def bench_one_config(
             **config,
             "status": "ok",
             "encoder": encoder,
-            "generate": generate,
             "decode": decode,
         }
     except Exception as e:
@@ -244,7 +222,6 @@ def bench_one_config(
             "status": "error",
             "error": str(e),
             "encoder": None,
-            "generate": None,
             "decode": None,
         }
     finally:

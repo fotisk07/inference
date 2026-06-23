@@ -39,7 +39,7 @@ app = typer.Typer()
 @app.command()
 def main(
     model_id: str = MODEL_ID,
-    device: str = "cuda",
+    device: str | None = None,
     dtype: Literal["bf16", "f16", "f32"] = "bf16",
     seed: int = 42,
     out: Path = Path("results/bench_speed"),

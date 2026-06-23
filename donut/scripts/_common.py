@@ -13,38 +13,40 @@ from donut.model import load_model
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 
 
-def resolve_device_dtype(device, dtype) -> tuple[str, torch.dtype]:
+def resolve_device_dtype(
+    device: str | None, dtype: str | None
+) -> tuple[str, torch.dtype]:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if dtype:
-        dtype = DTYPES[dtype]
+        torch_dtype = DTYPES[dtype]
     else:
-        dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
-    return device, dtype
+        torch_dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+    return device, torch_dtype
 
 
 def load_baseline_model(
-    model_id, device: str, dtype: str, tiny: bool = False
+    model_id, device: str | None, dtype: str | None, tiny: bool = False
 ) -> tuple[torch.nn.Module, str]:
     """Load the model with NO accelerations applied. Returns (model, model_id)."""
-    device, dtype = resolve_device_dtype(device, dtype)
+    device, torch_dtype = resolve_device_dtype(device, dtype)
     if tiny:
         from donut.synthetic import make_tiny_model
 
-        model = make_tiny_model(seed=0).to(device=device, dtype=dtype)
+        model = make_tiny_model(seed=0).to(device=device, dtype=torch_dtype)
         model_id = "tiny-random-donut"
     else:
         model_id = model_id or MODEL_ID
-        model, _ = load_model(model_id, device, dtype, backend="baseline")
-        model.to(device)
+        model, _ = load_model(model_id, device, torch_dtype, backend="baseline")
+        model.to(device)  # ty: ignore[invalid-argument-type]
     return model.eval(), model_id
 
 
-def run_meta(device: str, dtype: str, model_id: str) -> dict:
-    device, dtype = resolve_device_dtype(device, dtype)
+def run_meta(device: str | None, dtype: str | None, model_id: str) -> dict:
+    device, torch_dtype = resolve_device_dtype(device, dtype)
     return {
         "model_id": model_id,
         "device": device,
-        "dtype": str(dtype).removeprefix("torch."),
+        "dtype": str(torch_dtype).removeprefix("torch."),
         "torch": torch.__version__,
         "transformers": transformers.__version__,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),

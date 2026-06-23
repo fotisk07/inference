@@ -74,7 +74,7 @@ def main(
     num_heads: int = 16,
     head_dim: int = 64,
     dtype: Literal["bf16", "f16", "f32"] = "bf16",
-    device: str = "cuda",
+    device: str | None = None,
     kv_lens: str = "1,8,32,128,512,2048,4096",
     batch_sizes: str = "1,8,32",
     modes: str = "decode,prefill",
@@ -83,6 +83,7 @@ def main(
     seed: int = 42,
     out: Path | None = None,
 ) -> None:
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch_dtype = DTYPES[dtype]
     kv_len_list = _parse_ints(kv_lens)
     batch_size_list = _parse_ints(batch_sizes)

@@ -1,6 +1,5 @@
 """Shared CLI plumbing for the audit/bench scripts."""
 
-import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,12 +52,6 @@ def run_meta(device: str | None, dtype: str | None, model_id: str) -> dict:
     }
 
 
-def save_json(path: Path, obj) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2))
-    print(f"wrote {path}")
-
-
 def save_record(out_dir: Path, name: str, obj) -> None:
     """Write one self-describing record JSON into a results directory.
 
@@ -69,12 +62,3 @@ def save_record(out_dir: Path, name: str, obj) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / name
     path.write_text(json.dumps(obj, indent=2))
-
-
-def save_csv(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"wrote {path}")

@@ -179,6 +179,18 @@ def bench_one_config(
     try:
         apply_accel(model, backend)
         check_accel(model, backend)
+
+        # Untimed probe (bs=1) to read the live token counts from the model:
+        # num_patches is the Swin input grid the encoder ingests; num_image_tokens
+        # is the encoder output seq len -- the KV length the decoder cross-attends
+        # to. Both read from actual forwards, not an analytic formula.
+        probe = make_pixel_values(model, batch_size=1, seed=seed)
+        with torch.no_grad():
+            patch_emb, _ = model.encoder.embeddings.patch_embeddings(probe)
+            enc_out = model.encoder(probe, return_dict=True)
+        config["num_patches"] = patch_emb.shape[1]
+        config["num_image_tokens"] = enc_out.last_hidden_state.shape[1]
+
         encoder = bench_encoder(
             model, batch_size=batch_size, n_warmup=n_warmup, n_runs=n_runs, seed=seed
         )

@@ -3,77 +3,53 @@
 import json
 import random
 import time
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import mlflow
 import torch
+import typer
 from tqdm import tqdm
 from dataset import TASK_TOKEN, DonutDataset, load_samples, register_field_tokens
 from donut import load_model
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader
 from transformers import DonutProcessor, get_linear_schedule_with_warmup
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-class Config(BaseSettings):
-    model_config = SettingsConfigDict(cli_parse_args=True)
+@dataclass
+class Config:
+    """Typed bundle of training settings, built from the CLI by `main` below.
 
-    model_name: str = "naver-clova-ix/donut-base"
+    image_size is (height, width). token2json_format=True encodes fields as
+    <s_field>value</s_field> (parseable via processor.token2json); False is the
+    legacy symmetric format. backend/precision are passed through to the donut
+    accel path. See `main` for per-flag defaults and help.
+    """
 
-    data_json: str = "../test_data/train.json"
-    val_split: float = 0.2
-
-    # (height, width) — donut-base pretrain default; reduce to save GPU memory
-    image_size: tuple[int, int] = (1280, 960)
-
-    max_length: int = 128
-    batch_size: int = 4
-    num_workers: int = 4
-
-    lr: float = 3e-4
-    warmup_steps: int = 100
-    max_epochs: int = 30
-
-    # Saved as save_pretrained dirs: output_dir/best (lowest val loss) and
-    # output_dir/last (final epoch). Each holds model + processor + train_meta.json.
-    output_dir: str = "checkpoints"
-
-    # Set to an experiment name to enable MLflow logging, None to disable.
-    mlflow_experiment: str | None = None
-    # Name shown in the MLflow UI for this run; auto-generated from lr+bs if None.
-    run_name: str | None = None
-
-    # When True (default): encodes fields as <s_field>value</s_field>, always
-    # emitting every field (missing ones get a <missing> placeholder) — output
-    # parseable with processor.token2json(seq) after stripping task/pad/EOS
-    # tokens. When False: legacy symmetric format <field> value <field>.
-    token2json_format: bool = True
-
-    # Acceleration backend passed to donut.load_model(). "eager" disables all
-    # patches except mask caching; "sdpa" adds PyTorch SDPA; "fa" requires CUDA + flash-attn.
-    backend: str = "sdpa"
-
-    # Compute precision on CUDA. "bf16" (default): fp32 master weights + optimizer
-    # state with bf16 autocast compute — stable to fine-tune, and the accel kernels
-    # still run in bf16. "fp32": everything fp32 (slower, no autocast). Ignored on CPU.
-    precision: str = "bf16"
-
-    grad_clip: float = 1.0
-    weight_decay: float = 0.01
-    # Set to fix random.shuffle order and torch ops for reproducible val splits.
-    seed: int | None = None
-
-    # When True: use the tiny random model from donut.synthetic on a small data
-    # subset. Runs on CPU in seconds with no HF downloads. Zero exit = pipeline OK.
-    smoke: bool = False
-    smoke_n_samples: int = 4
-    smoke_epochs: int = 5
-
-    device: str = Field(
-        default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    model_name: str
+    data_json: str
+    val_split: float
+    image_size: tuple[int, int]
+    max_length: int
+    batch_size: int
+    num_workers: int
+    lr: float
+    warmup_steps: int
+    max_epochs: int
+    output_dir: str
+    mlflow_experiment: str | None
+    run_name: str | None
+    token2json_format: bool
+    backend: str
+    precision: str
+    grad_clip: float
+    weight_decay: float
+    seed: int | None
+    smoke: bool
+    smoke_n_samples: int
+    smoke_epochs: int
+    device: str
 
 
 # ── Precision ─────────────────────────────────────────────────────────────────
@@ -157,16 +133,15 @@ def _seed_worker(worker_id: int) -> None:
 # ── Training loop ─────────────────────────────────────────────────────────────
 def train(config: Config) -> None:
     if config.smoke:
-        config = config.model_copy(
-            update=dict(
-                device="cpu",
-                image_size=(64, 64),
-                batch_size=1,
-                num_workers=0,
-                warmup_steps=0,
-                max_epochs=config.smoke_epochs,
-                mlflow_experiment=None,
-            )
+        config = replace(
+            config,
+            device="cpu",
+            image_size=(64, 64),
+            batch_size=1,
+            num_workers=0,
+            warmup_steps=0,
+            max_epochs=config.smoke_epochs,
+            mlflow_experiment=None,
         )
 
     print(f"\n{'=' * 60}")
@@ -182,7 +157,7 @@ def train(config: Config) -> None:
         mlflow.set_experiment(config.mlflow_experiment)
         run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
         mlflow.start_run(run_name=run_name)
-        mlflow.log_params(config.model_dump())
+        mlflow.log_params(asdict(config))
 
     # --- model + processor (single processor is the sole vocab source) ---
     if config.smoke:
@@ -327,5 +302,74 @@ def train(config: Config) -> None:
         mlflow.end_run()
 
 
+# ── CLI ─────────────────────────────────────────────────────────────────────--
+app = typer.Typer(add_completion=False)
+
+
+@app.command()
+def main(
+    model_name: str = "naver-clova-ix/donut-base",
+    data_json: str = "../test_data/train.json",
+    val_split: float = 0.2,
+    # (height, width) fed to the encoder; lower = faster + less VRAM, less legible.
+    image_height: int = 1280,
+    image_width: int = 960,
+    max_length: int = 128,
+    batch_size: int = 4,
+    num_workers: int = 4,
+    lr: float = 3e-4,
+    warmup_steps: int = 100,
+    max_epochs: int = 30,
+    # Parent of the best/ (lowest val loss) and last/ save_pretrained dirs.
+    output_dir: str = "checkpoints",
+    # Set an experiment name to enable MLflow logging; run_name defaults to lr+bs.
+    mlflow_experiment: str | None = None,
+    run_name: str | None = None,
+    token2json_format: bool = True,
+    # donut accel backend, active in training: eager/sdpa/fa.
+    backend: str = "sdpa",
+    # On CUDA: "bf16" = fp32 master weights + bf16 autocast compute; "fp32" = all fp32.
+    precision: str = "bf16",
+    grad_clip: float = 1.0,
+    weight_decay: float = 0.01,
+    # Set (e.g. 42) for reproducible shuffle order + split.
+    seed: int | None = None,
+    # Tiny offline model on CPU, few samples — proves the pipeline (CI). No saving.
+    smoke: bool = False,
+    smoke_n_samples: int = 4,
+    smoke_epochs: int = 5,
+    # Defaults to cuda when available, else cpu.
+    device: str | None = None,
+) -> None:
+    """Fine-tune Donut for field extraction."""
+    train(
+        Config(
+            model_name=model_name,
+            data_json=data_json,
+            val_split=val_split,
+            image_size=(image_height, image_width),
+            max_length=max_length,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            lr=lr,
+            warmup_steps=warmup_steps,
+            max_epochs=max_epochs,
+            output_dir=output_dir,
+            mlflow_experiment=mlflow_experiment,
+            run_name=run_name,
+            token2json_format=token2json_format,
+            backend=backend,
+            precision=precision,
+            grad_clip=grad_clip,
+            weight_decay=weight_decay,
+            seed=seed,
+            smoke=smoke,
+            smoke_n_samples=smoke_n_samples,
+            smoke_epochs=smoke_epochs,
+            device=device or ("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+    )
+
+
 if __name__ == "__main__":
-    train(Config())
+    app()

@@ -1,38 +1,28 @@
 """Generate predictions from a fine-tuned Donut checkpoint."""
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import typer
 from dataset import TASK_TOKEN, load_samples, parse_prediction
 from tqdm import tqdm
 from donut import load_model
 from metrics import summarize
 from PIL import Image
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Config(BaseSettings):
-    model_config = SettingsConfigDict(cli_parse_args=True)
+@dataclass
+class Config:
+    """Typed bundle of inference settings, built from the CLI by `main` below."""
 
-    checkpoint: str  # required; path to a checkpoint dir saved by train.py (e.g. checkpoints/best)
-
-    # Input data — same aggregate JSON format as train.py
-    data_json: str = "../test_data/train.json"
-
-    # If given, write per-document {image, gt, pred} records to this JSON path.
-    output_json: str | None = None
-
-    # Acceleration backend passed to donut.load_model()
-    backend: str = "sdpa"
-
-    # Maximum decoder tokens to generate per image
-    max_new_tokens: int = 128
-
-    device: str = Field(
-        default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    checkpoint: str  # checkpoint dir saved by train.py (e.g. checkpoints/best)
+    data_json: str
+    output_json: str | None
+    backend: str
+    max_new_tokens: int
+    device: str
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
@@ -151,5 +141,33 @@ def predict(cfg: Config) -> None:
         print(f"Saved → {out_path}")
 
 
+# ── CLI ─────────────────────────────────────────────────────────────────────--
+app = typer.Typer(add_completion=False)
+
+
+@app.command()
+def main(
+    # Checkpoint dir saved by train.py (e.g. checkpoints/best or checkpoints/last).
+    checkpoint: str,
+    data_json: str = "../test_data/train.json",
+    # If given, write per-document {image, gt, pred} records to this JSON path.
+    output_json: str | None = None,
+    backend: str = "sdpa",
+    max_new_tokens: int = 128,
+    device: str | None = None,
+) -> None:
+    """Score a fine-tuned Donut checkpoint on labelled data."""
+    predict(
+        Config(
+            checkpoint=checkpoint,
+            data_json=data_json,
+            output_json=output_json,
+            backend=backend,
+            max_new_tokens=max_new_tokens,
+            device=device or ("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+    )
+
+
 if __name__ == "__main__":
-    predict(Config())
+    app()

@@ -5,21 +5,21 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.12.0",
-    "transformers>=4.40.0",
-    "pillow>=10.0.0",
-    "sentencepiece>=0.1.99",
-    "mlflow>=3.13.0",
-    "pydantic-settings>=2.0",
-    "pyyaml>=6.0.3",
     "donut",
-    "tqdm>=4.67.3",
+    "mlflow>=3.13.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.3",
+    "torch>=2.11.0",
+    "tqdm>=4.68.2",
+    "transformers>=5.12.0",
+    "typer>=0.25.1",
 ]
+[project.optional-dependencies]
+fa4 = ["flash-attn-4>=4.0.0b15"]
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.2.0",
+    "ruff>=0.15.13",
 ]
-
 [tool.uv.sources]
 donut = { path = "../donut", editable = true }

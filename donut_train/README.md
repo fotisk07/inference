@@ -31,49 +31,48 @@ valid fields lives in `config.yaml` (`TASK_TOKEN`, `FIELD_TOKENS`).
 
 ## Quick start
 
+The CLIs use [Typer](https://typer.dev): flags are hyphenated (`--data-json`),
+booleans are switches (`--smoke`, `--no-token2json-format`), and
+`python train.py --help` / `python predict.py --help` list everything.
+
 ```bash
 # 1. Smoke test — tiny offline model on CPU, seconds. Proves the
 #    pipeline works end-to-end. Zero exit = OK.
-uv run python train.py --smoke true
+uv run python train.py --smoke
 
 # 2. Real fine-tune (downloads donut-base the first time).
-uv run python train.py --data_json /path/train.json --device cuda \
-  --image_size '[1280,960]' --batch_size 4 --max_epochs 30 --seed 42
+uv run python train.py --data-json /path/train.json --device cuda \
+  --image-height 1280 --image-width 960 --batch-size 4 --max-epochs 30 --seed 42
 
 # 3. Score a saved checkpoint on labelled data (prints P/R/F1 tables).
-#    --checkpoint is a saved dir: checkpoints/best (lowest val loss) or
-#    checkpoints/last (final epoch). Add --output_json preds.json to dump
+#    The checkpoint is a saved dir: checkpoints/best (lowest val loss) or
+#    checkpoints/last (final epoch). Add --output-json preds.json to dump
 #    per-document {image, gt, pred} records.
-uv run python predict.py --checkpoint checkpoints/best \
-  --data_json /path/val.json
+uv run python predict.py checkpoints/best --data-json /path/val.json
 ```
-
-> **Note on `--image_size`.** It is a `(height, width)` tuple, so pass it as a
-> JSON list: `--image_size '[1280,960]'`. `--image_size 1280 960` does **not**
-> work.
 
 ---
 
 ## `train.py` — the knobs that matter
 
-| flag                  | default        | meaning                                                        |
-|-----------------------|----------------|----------------------------------------------------------------|
-| `--data_json`         | test_data      | aggregate JSON described above.                               |
-| `--val_split`         | 0.2            | fraction held out for validation.                            |
-| `--image_size`        | `[1280,960]`   | `(H,W)` fed to the encoder. **Lower = faster + less VRAM, but less legible.** |
-| `--batch_size`        | 4              | docs per step. Higher = faster/epoch but more VRAM.          |
-| `--lr`                | 3e-4           | AdamW learning rate.                                         |
-| `--max_epochs`        | 30             | training epochs.                                            |
-| `--max_length`        | 128            | max decoder tokens (also the eval generation cap).          |
-| `--backend`           | sdpa           | attention backend from `donut`, active in training (eager/sdpa/fa). |
-| `--precision`         | bf16           | on CUDA: fp32 master weights + bf16 autocast compute. `fp32` for full fp32. |
-| `--seed`              | None           | set it (e.g. 42) for reproducible shuffles/splits.          |
-| `--weight_decay`      | 0.01           | AdamW weight decay.                                         |
-| `--grad_clip`         | 1.0            | gradient-norm clip.                                        |
-| `--warmup_steps`      | 100            | linear-warmup steps.                                       |
-| `--token2json_format` | true           | encode every field as `<s_x>v or <missing></s_x>` (parseable) vs legacy. |
-| `--output_dir`        | checkpoints    | parent of the `best/` and `last/` checkpoint dirs.         |
-| `--mlflow_experiment` | None           | set a name to log params/metrics to MLflow.                |
+| flag                      | default        | meaning                                                        |
+|---------------------------|----------------|----------------------------------------------------------------|
+| `--data-json`             | test_data      | aggregate JSON described above.                               |
+| `--val-split`             | 0.2            | fraction held out for validation.                            |
+| `--image-height/-width`   | 1280 / 960     | `(H,W)` fed to the encoder. **Lower = faster + less VRAM, but less legible.** |
+| `--batch-size`            | 4              | docs per step. Higher = faster/epoch but more VRAM.          |
+| `--lr`                    | 3e-4           | AdamW learning rate.                                         |
+| `--max-epochs`            | 30             | training epochs.                                            |
+| `--max-length`            | 128            | max decoder tokens (also the eval generation cap).          |
+| `--backend`               | sdpa           | attention backend from `donut`, active in training (eager/sdpa/fa). |
+| `--precision`             | bf16           | on CUDA: fp32 master weights + bf16 autocast compute. `fp32` for full fp32. |
+| `--seed`                  | None           | set it (e.g. 42) for reproducible shuffles/splits.          |
+| `--weight-decay`          | 0.01           | AdamW weight decay.                                         |
+| `--grad-clip`             | 1.0            | gradient-norm clip.                                        |
+| `--warmup-steps`          | 100            | linear-warmup steps.                                       |
+| `--token2json-format`     | true           | encode every field as `<s_x>v or <missing></s_x>` (parseable) vs legacy. |
+| `--output-dir`            | checkpoints    | parent of the `best/` and `last/` checkpoint dirs.         |
+| `--mlflow-experiment`     | None           | set a name to log params/metrics to MLflow.                |
 | `--smoke`             | false          | tiny offline model, CPU, 64×64, few samples — for CI.       |
 
 Weights load in fp32 (stable master weights + optimizer state); with

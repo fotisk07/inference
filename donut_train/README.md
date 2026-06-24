@@ -119,7 +119,9 @@ The `donut` package's accel backends speed up inference. Whether they speed up
 **training** is a separate question, answered with two measurements.
 
 **Metrics — `docs/s = batch_size / Δt`**, where one *doc* = one image + its label
-sequence. The only variable is the time window Δt:
+sequence. The only variable is the time window Δt. See **[METRICS.md](METRICS.md)** for
+the precise definition of every number (formulas, what each window includes, how it's
+measured). In short:
 
 - **e2e docs/s** — full step wall-time (data fetch + H2D + fwd + bwd + opt). Practical
   training throughput.

@@ -1,5 +1,6 @@
 """Donut fine-tuning training script."""
 
+import json
 import random
 import time
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import mlflow
 import torch
 from tqdm import tqdm
-from dataset import DonutDataset, load_samples, register_field_tokens
+from dataset import TASK_TOKEN, DonutDataset, load_samples, register_field_tokens
 from donut import load_model
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,8 +36,9 @@ class Config(BaseSettings):
     warmup_steps: int = 100
     max_epochs: int = 30
 
+    # Saved as save_pretrained dirs: output_dir/best (lowest val loss) and
+    # output_dir/last (final epoch). Each holds model + processor + train_meta.json.
     output_dir: str = "checkpoints"
-    save_every_n_epochs: int = 1
 
     # Set to an experiment name to enable MLflow logging, None to disable.
     mlflow_experiment: str | None = None
@@ -105,10 +107,28 @@ def build_model(cfg: "Config"):
         )
     register_field_tokens(processor, cfg.token2json_format)
     model.decoder.resize_token_embeddings(len(processor.tokenizer))
-    # naver-standard: pad as decoder start, task token lives in labels
+    # Canonical Donut: the task token is the decoder start (auto-prepended to the
+    # labels by shift_tokens_right); pad stays pad for loss masking / padding.
     model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.decoder_start_token_id = processor.tokenizer.pad_token_id
+    model.config.decoder_start_token_id = processor.tokenizer.convert_tokens_to_ids(
+        TASK_TOKEN
+    )
     return model, processor
+
+
+def save_checkpoint(model, processor, out_dir: Path, token2json_format: bool) -> None:
+    """Save a portable HF artifact (model + processor) plus a small meta sidecar.
+
+    image_size lives in the processor's image-processor config; token2json_format is
+    the one thing save_pretrained doesn't capture, so predict.py reads it back from
+    train_meta.json to pick the right output parser.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(out_dir)
+    processor.save_pretrained(out_dir)
+    (out_dir / "train_meta.json").write_text(
+        json.dumps({"token2json_format": token2json_format})
+    )
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
@@ -120,12 +140,18 @@ def evaluate(
         return None
     model.eval()
     total_loss = 0.0
-    for batch in loader:
+    for batch in tqdm(loader, desc="val", leave=False):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
         with autocast(device, precision):
             total_loss += model(pixel_values=pixel_values, labels=labels).loss.item()
     return total_loss / len(loader)
+
+
+def _seed_worker(worker_id: int) -> None:
+    """Seed each DataLoader worker so augmentation/order is reproducible."""
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
@@ -195,12 +221,19 @@ def train(config: Config) -> None:
         token2json_format=config.token2json_format,
     )
     pin_memory = "cuda" in config.device
+    # Deterministic shuffle order when a seed is set (not just the split).
+    generator = None
+    if config.seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(config.seed)
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         pin_memory=pin_memory,
+        generator=generator,
+        worker_init_fn=_seed_worker if config.seed is not None else None,
     )
     val_loader = DataLoader(
         val_ds,
@@ -221,9 +254,8 @@ def train(config: Config) -> None:
     )
     print(f"Total steps: {total_steps}  warmup: {config.warmup_steps}\n")
 
-    if not config.smoke:
-        Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     global_step = 0
+    best_val_loss = float("inf")
 
     for epoch in range(config.max_epochs):
         # --- train epoch ---
@@ -276,25 +308,18 @@ def train(config: Config) -> None:
                 metrics["val_loss"] = val_loss
             mlflow.log_metrics(metrics, step=epoch + 1)
 
-        # --- checkpoint ---
-        if not config.smoke and (epoch + 1) % config.save_every_n_epochs == 0:
-            ckpt_path = (
-                Path(config.output_dir) / f"epoch_{epoch + 1:03d}_val{val_loss:.4f}.pt"
-            )
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "epoch": epoch,
-                    "val_loss": val_loss,
-                    # metadata needed by predict.py to reconstruct the model
-                    "model_name": config.model_name,
-                    "token2json_format": config.token2json_format,
-                    "image_size": config.image_size,
-                    "max_length": config.max_length,
-                },
-                ckpt_path,
-            )
-            print(f"           saved → {ckpt_path}")
+        # --- checkpoint: keep the best-by-val-loss ---
+        if not config.smoke and val_loss is not None and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_dir = Path(config.output_dir) / "best"
+            save_checkpoint(model, processor, best_dir, config.token2json_format)
+            print(f"           saved best (val={val_loss:.4f}) → {best_dir}")
+
+    # --- checkpoint: final weights ---
+    if not config.smoke:
+        last_dir = Path(config.output_dir) / "last"
+        save_checkpoint(model, processor, last_dir, config.token2json_format)
+        print(f"Saved last → {last_dir}")
 
     print("\nTraining complete.")
 

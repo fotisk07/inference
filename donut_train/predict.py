@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import torch
-from dataset import TASK_TOKEN, load_samples, parse_prediction, register_field_tokens
+from dataset import TASK_TOKEN, load_samples, parse_prediction
 from tqdm import tqdm
 from donut import load_model
 from metrics import summarize
@@ -16,13 +16,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Config(BaseSettings):
     model_config = SettingsConfigDict(cli_parse_args=True)
 
-    checkpoint: str  # required; path to a .pt file saved by train.py
+    checkpoint: str  # required; path to a checkpoint dir saved by train.py (e.g. checkpoints/best)
 
     # Input data — same aggregate JSON format as train.py
     data_json: str = "../test_data/train.json"
 
-    # If given, write predictions as a JSON file in the same aggregate format as
-    # train.json, with annotator_text replaced by the model's predicted value.
+    # If given, write per-document {image, gt, pred} records to this JSON path.
     output_json: str | None = None
 
     # Acceleration backend passed to donut.load_model()
@@ -39,27 +38,22 @@ class Config(BaseSettings):
 # ── Model loading ─────────────────────────────────────────────────────────────
 
 
-def load_from_checkpoint(ckpt_path: str, backend: str, device: str):
+def load_from_checkpoint(ckpt_dir: str, backend: str, device: str):
     """
-    Reconstruct model and processor from a checkpoint saved by train.py.
+    Load model and processor from a checkpoint dir saved by train.save_checkpoint.
 
-    The checkpoint embeds the metadata (model_name, token2json_format, etc.)
-    needed to rebuild the exact same architecture and vocabulary without
-    requiring the user to pass those flags again.
+    from_pretrained on the local dir restores the fine-tuned weights, the
+    added-token processor, image_size, and decoder_start — everything
+    save_pretrained persists. token2json_format (which it doesn't) is read from
+    the train_meta.json sidecar to pick the right output parser.
     """
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt_dir = Path(ckpt_dir)
+    meta = json.loads((ckpt_dir / "train_meta.json").read_text())
+    token2json_format = meta["token2json_format"]
 
-    model_name = ckpt.get("model_name", "naver-clova-ix/donut-base")
-    token2json_format = ckpt.get("token2json_format", False)
-    image_size = ckpt.get("image_size", (1280, 960))
-
-    model, processor = load_model(model_id=model_name, device=device, backend=backend)
-    register_field_tokens(processor, token2json_format)
-    processor.image_processor.size = {"height": image_size[0], "width": image_size[1]}
-    model.decoder.resize_token_embeddings(len(processor.tokenizer))
-    model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.decoder_start_token_id = processor.tokenizer.pad_token_id
-    model.load_state_dict(ckpt["model"])
+    model, processor = load_model(
+        model_id=str(ckpt_dir), device=device, backend=backend
+    )
     model.eval()
 
     return model, processor, token2json_format
@@ -77,28 +71,22 @@ def run_predictions(
     device: str,
     max_new_tokens: int = 128,
     progress: bool = True,
-) -> tuple[list[dict], list[dict]]:
+) -> list[dict]:
     """Generate field predictions for every sample.
 
-    Returns (results, output_records):
-      results        — [{"image", "pred", "gt"}] for metrics.py scoring
-      output_records — same aggregate JSON format as train.json, predicted values
+    Returns [{"image", "gt": {field: value}, "pred": {field: value}}] — used both
+    for metrics.py scoring and (verbatim) as the saved --output_json.
     """
     model.eval()
     model_dtype = next(model.parameters()).dtype
-    task_ids = processor.tokenizer(
+    # Canonical Donut: the task token is the decoder start (train.build_model sets
+    # decoder_start_token_id = <s_donut>), so seeding generation with it matches the
+    # training-time decoder input position-for-position.
+    decoder_input_ids = processor.tokenizer(
         TASK_TOKEN, add_special_tokens=False, return_tensors="pt"
     ).input_ids.to(device)
-    # Training feeds the decoder [pad, <s_donut>, <field1>, ...] — pad is the
-    # decoder_start, the task token sits at position 1 (see train.py/dataset.py).
-    # HF special-cases Donut and does NOT prepend decoder_start to a provided
-    # decoder_input_ids, so seed the exact training prefix ourselves: pad + task.
-    start = torch.full(
-        (task_ids.shape[0], 1), model.config.decoder_start_token_id, device=device
-    )
-    decoder_input_ids = torch.cat([start, task_ids], dim=-1)
 
-    results, output_records = [], []
+    results = []
     iterator = tqdm(samples, desc="predicting") if progress else samples
     for sample in iterator:
         image = Image.open(sample["image"]).convert("RGB")
@@ -124,19 +112,10 @@ def run_predictions(
         }
 
         results.append(
-            {"image": str(sample["image"]), "pred": pred_fields, "gt": gt_fields}
-        )
-        output_records.append(
-            {
-                "image": str(sample["image"]),
-                "fields": [
-                    {"field_name": k, "annotator_text": v}
-                    for k, v in pred_fields.items()
-                ],
-            }
+            {"image": str(sample["image"]), "gt": gt_fields, "pred": pred_fields}
         )
 
-    return results, output_records
+    return results
 
 
 def predict(cfg: Config) -> None:
@@ -151,7 +130,7 @@ def predict(cfg: Config) -> None:
     samples = load_samples(Path(cfg.data_json))
     print(f"Processing {len(samples)} samples ...")
 
-    results, output_records = run_predictions(
+    results = run_predictions(
         model,
         processor,
         samples,
@@ -165,10 +144,10 @@ def predict(cfg: Config) -> None:
         summarize(results, soft=False)
         summarize(results, soft=True)
 
-    # Save output JSON
+    # Save output JSON — per-document {image, gt, pred} records
     if cfg.output_json:
         out_path = Path(cfg.output_json)
-        out_path.write_text(json.dumps(output_records, indent=2, ensure_ascii=False))
+        out_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
         print(f"Saved → {out_path}")
 
 

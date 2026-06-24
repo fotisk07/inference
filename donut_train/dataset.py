@@ -199,7 +199,6 @@ class DonutDataset(Dataset):
     Each item returns:
         pixel_values  (3, H, W) float tensor
         labels        (max_length,) int64 tensor, padding replaced with -100
-        target_text   the raw label string, useful for notebook inspection
     """
 
     def __init__(
@@ -230,17 +229,16 @@ class DonutDataset(Dataset):
             0
         )
 
-        # Labels: TASK_TOKEN first (naver-standard), then fields, then EOS
-        target_text = (
-            TASK_TOKEN
-            + format_label(
-                sample["fields"], self.include_missing, self.token2json_format
-            )
+        # Labels: fields then EOS. The TASK_TOKEN is the decoder_start_token_id
+        # (set in train.build_model), which shift_tokens_right auto-prepends as the
+        # decoder input — so it must NOT also appear here as a target.
+        label_text = (
+            format_label(sample["fields"], self.include_missing, self.token2json_format)
             + self.processor.tokenizer.eos_token
         )
 
         tokenized = self.processor.tokenizer(
-            target_text,
+            label_text,
             add_special_tokens=False,
             max_length=self.max_length,
             padding="max_length",
@@ -253,5 +251,4 @@ class DonutDataset(Dataset):
         return {
             "pixel_values": pixel_values,
             "labels": labels,
-            "target_text": target_text,
         }

@@ -89,6 +89,14 @@ def run_predictions(
     task_ids = processor.tokenizer(
         TASK_TOKEN, add_special_tokens=False, return_tensors="pt"
     ).input_ids.to(device)
+    # Training feeds the decoder [pad, <s_donut>, <field1>, ...] — pad is the
+    # decoder_start, the task token sits at position 1 (see train.py/dataset.py).
+    # HF special-cases Donut and does NOT prepend decoder_start to a provided
+    # decoder_input_ids, so seed the exact training prefix ourselves: pad + task.
+    start = torch.full(
+        (task_ids.shape[0], 1), model.config.decoder_start_token_id, device=device
+    )
+    decoder_input_ids = torch.cat([start, task_ids], dim=-1)
 
     results, output_records = [], []
     iterator = tqdm(samples, desc="predicting") if progress else samples
@@ -101,7 +109,7 @@ def run_predictions(
         with torch.no_grad():
             output_ids = model.generate(
                 pixel_values,
-                decoder_input_ids=task_ids,
+                decoder_input_ids=decoder_input_ids,
                 max_new_tokens=max_new_tokens,
             )
 

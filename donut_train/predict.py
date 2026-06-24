@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 import torch
-from dataset import TASK_TOKEN, build_processor, load_samples, parse_prediction
+from dataset import TASK_TOKEN, load_samples, parse_prediction, register_field_tokens
 from tqdm import tqdm
 from donut import load_model
-from metrics import doc_stats, field_stats, summarize
+from metrics import summarize
 from PIL import Image
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,10 +53,9 @@ def load_from_checkpoint(ckpt_path: str, backend: str, device: str):
     token2json_format = ckpt.get("token2json_format", False)
     image_size = ckpt.get("image_size", (1280, 960))
 
-    processor = build_processor(model_name, token2json_format)
+    model, processor = load_model(model_id=model_name, device=device, backend=backend)
+    register_field_tokens(processor, token2json_format)
     processor.image_processor.size = {"height": image_size[0], "width": image_size[1]}
-
-    model, _ = load_model(model_id=model_name, device=device, backend=backend)
     model.decoder.resize_token_embeddings(len(processor.tokenizer))
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.pad_token_id
@@ -130,63 +129,6 @@ def run_predictions(
         )
 
     return results, output_records
-
-
-def _micro_f1(results: list[dict], soft: bool) -> dict:
-    """Micro-averaged precision/recall/F1 across all fields (sum counts first)."""
-    fs = field_stats(results, soft=soft)
-    tp = sum(s["tp"] for s in fs.values())
-    fp = sum(s["fp"] for s in fs.values())
-    fn = sum(s["fn"] for s in fs.values())
-    precision = tp / (tp + fp) if (tp + fp) else None
-    recall = tp / (tp + fn) if (tp + fn) else None
-    if precision and recall:
-        f1 = 2 * precision * recall / (precision + recall)
-    else:
-        f1 = None
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-    }
-
-
-def predict_and_score(
-    model,
-    processor,
-    samples: list[dict],
-    *,
-    token2json_format: bool,
-    device: str,
-    max_new_tokens: int = 128,
-    progress: bool = True,
-) -> dict:
-    """Run predictions and return a compact, JSON-serializable quality summary.
-
-    Used by train.py to score each ablation run on its validation split. Reports
-    micro-averaged F1 under strict (exact) and soft (normalized) matching, plus
-    the document-level breakdown (perfect / fn_only / fp_only / mixed).
-    """
-    results, _ = run_predictions(
-        model,
-        processor,
-        samples,
-        token2json_format=token2json_format,
-        device=device,
-        max_new_tokens=max_new_tokens,
-        progress=progress,
-    )
-    ds = doc_stats(results, soft=False)
-    return {
-        "n_samples": len(samples),
-        "n_with_gt": ds["n_with_gt"],
-        "strict": _micro_f1(results, soft=False),
-        "soft": _micro_f1(results, soft=True),
-        "doc_stats": {k: ds[k] for k in ("perfect", "fn_only", "fp_only", "mixed")},
-    }
 
 
 def predict(cfg: Config) -> None:

@@ -1,6 +1,5 @@
 """Donut fine-tuning training script."""
 
-import json
 import random
 import time
 from pathlib import Path
@@ -8,13 +7,12 @@ from pathlib import Path
 import mlflow
 import torch
 from tqdm import tqdm
-from dataset import DonutDataset, build_processor, load_samples
+from dataset import DonutDataset, load_samples, register_field_tokens
 from donut import load_model
-from predict import predict_and_score
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader
-from transformers import get_linear_schedule_with_warmup
+from transformers import DonutProcessor, get_linear_schedule_with_warmup
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -40,11 +38,6 @@ class Config(BaseSettings):
     output_dir: str = "checkpoints"
     save_every_n_epochs: int = 1
 
-    # When set, after training run a field-level eval on the validation split and
-    # write a one-line ablation summary (config + F1 + speed) to this JSON path.
-    # This is what the scripts/exp_*.sh sweeps collect for notebooks/ablation.ipynb.
-    ablation_out: str | None = None
-
     # Set to an experiment name to enable MLflow logging, None to disable.
     mlflow_experiment: str | None = None
     # Name shown in the MLflow UI for this run; auto-generated from lr+bs if None.
@@ -59,6 +52,11 @@ class Config(BaseSettings):
     # Acceleration backend passed to donut.load_model(). "eager" disables all
     # patches except mask caching; "sdpa" adds PyTorch SDPA; "fa" requires CUDA + flash-attn.
     backend: str = "sdpa"
+
+    # Compute precision on CUDA. "bf16" (default): fp32 master weights + optimizer
+    # state with bf16 autocast compute — stable to fine-tune, and the accel kernels
+    # still run in bf16. "fp32": everything fp32 (slower, no autocast). Ignored on CPU.
+    precision: str = "bf16"
 
     grad_clip: float = 1.0
     weight_decay: float = 0.01
@@ -76,35 +74,57 @@ class Config(BaseSettings):
     )
 
 
+# ── Precision ─────────────────────────────────────────────────────────────────
+def autocast(device: str, precision: str):
+    """bf16 autocast on CUDA when precision=="bf16"; an inert no-op otherwise."""
+    enabled = device.startswith("cuda") and precision == "bf16"
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    return torch.autocast(
+        device_type=device_type, dtype=torch.bfloat16, enabled=enabled
+    )
+
+
 # ── Model setup ───────────────────────────────────────────────────────────────
-def build_model(cfg: "Config", processor):
+def build_model(cfg: "Config"):
+    """Return (model, processor) with field tokens registered and embeddings resized.
+
+    Weights load in fp32 (master weights for stable fine-tuning); bf16 compute is
+    applied at the forward via autocast(). The accel backend stays active either way.
+    """
     if cfg.smoke:
         from donut.synthetic import make_tiny_model
 
         model = make_tiny_model()
+        processor = DonutProcessor.from_pretrained(cfg.model_name)
     else:
-        model, _ = load_model(
-            model_id=cfg.model_name, device=cfg.device, backend=cfg.backend
+        model, processor = load_model(
+            model_id=cfg.model_name,
+            device=cfg.device,
+            dtype=torch.float32,
+            backend=cfg.backend,
         )
+    register_field_tokens(processor, cfg.token2json_format)
     model.decoder.resize_token_embeddings(len(processor.tokenizer))
     # naver-standard: pad as decoder start, task token lives in labels
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.pad_token_id
-    return model
+    return model, processor
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> float | None:
+def evaluate(
+    model: torch.nn.Module, loader: DataLoader, device: str, precision: str
+) -> float | None:
     if len(loader) == 0:
         return None
     model.eval()
-    model_dtype = next(model.parameters()).dtype
     total_loss = 0.0
     for batch in loader:
-        pixel_values = batch["pixel_values"].to(device=device, dtype=model_dtype)
+        pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
-        total_loss += model(pixel_values=pixel_values, labels=labels).loss.item()
+        with autocast(device, precision):
+            total_loss += model(pixel_values=pixel_values, labels=labels).loss.item()
     return total_loss / len(loader)
 
 
@@ -138,12 +158,18 @@ def train(config: Config) -> None:
         mlflow.start_run(run_name=run_name)
         mlflow.log_params(config.model_dump())
 
-    # --- data ---
-    processor = build_processor(config.model_name, config.token2json_format)
+    # --- model + processor (single processor is the sole vocab source) ---
+    if config.smoke:
+        print("Loading tiny model (donut.synthetic, CPU, no downloads) ...")
+    else:
+        print(f"Loading model from {config.model_name} (backend={config.backend}) ...")
+    model, processor = build_model(config)
     processor.image_processor.size = {
         "height": config.image_size[0],
         "width": config.image_size[1],
     }
+
+    # --- data ---
     samples = load_samples(Path(config.data_json))
 
     if config.seed is not None:
@@ -183,14 +209,6 @@ def train(config: Config) -> None:
         pin_memory=pin_memory,
     )
 
-    # --- model ---
-    if config.smoke:
-        print("Loading tiny model (donut.synthetic, CPU, no downloads) ...")
-    else:
-        print(f"Loading model from {config.model_name} (backend={config.backend}) ...")
-    model = build_model(config, processor)
-    model_dtype = next(model.parameters()).dtype
-
     # --- optimizer + scheduler ---
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.lr, weight_decay=config.weight_decay
@@ -220,12 +238,11 @@ def train(config: Config) -> None:
             leave=False,
         )
         for batch in batch_bar:
-            pixel_values = batch["pixel_values"].to(
-                device=config.device, dtype=model_dtype
-            )
+            pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
 
-            loss = model(pixel_values=pixel_values, labels=labels).loss
+            with autocast(config.device, config.precision):
+                loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             optimizer.step()
@@ -244,7 +261,7 @@ def train(config: Config) -> None:
         docs_per_sec = docs_trained / epoch_secs
 
         # --- validation ---
-        val_loss = evaluate(model, val_loader, config.device)
+        val_loss = evaluate(model, val_loader, config.device, config.precision)
         model.train()
 
         val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
@@ -280,41 +297,6 @@ def train(config: Config) -> None:
             print(f"           saved → {ckpt_path}")
 
     print("\nTraining complete.")
-
-    # --- ablation summary: field-level F1 on the val split (final-epoch weights) ---
-    if config.ablation_out and val_samples:
-        print("\nScoring validation split for ablation summary ...")
-        quality = predict_and_score(
-            model,
-            processor,
-            val_samples,
-            token2json_format=config.token2json_format,
-            device=config.device,
-            max_new_tokens=config.max_length,
-        )
-        summary = {
-            "image_size": list(config.image_size),
-            "batch_size": config.batch_size,
-            "lr": config.lr,
-            "max_epochs": config.max_epochs,
-            "backend": config.backend,
-            "model_name": config.model_name,
-            "n_train": len(train_samples),
-            "final_val_loss": val_loss,
-            "docs_per_sec": docs_per_sec,
-            "f1_strict": quality["strict"]["f1"],
-            "f1_soft": quality["soft"]["f1"],
-            "quality": quality,
-            "config": config.model_dump(),
-        }
-        out_path = Path(config.ablation_out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
-        print(f"Ablation summary → {out_path}  (f1_strict={summary['f1_strict']})")
-        if config.mlflow_experiment:
-            for k in ("f1_strict", "f1_soft"):
-                if summary[k] is not None:
-                    mlflow.log_metric(k, summary[k])
 
     if config.mlflow_experiment:
         mlflow.end_run()

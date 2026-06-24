@@ -26,9 +26,14 @@ def _t2j_pairs() -> list[tuple[str, str]]:
 # ── Processor ─────────────────────────────────────────────────────────────────
 
 
-def build_processor(model_name: str, token2json_format: bool = False) -> DonutProcessor:
-    """Load DonutProcessor and register all task + field tokens."""
-    processor = DonutProcessor.from_pretrained(model_name)
+def register_field_tokens(
+    processor: DonutProcessor, token2json_format: bool = False
+) -> DonutProcessor:
+    """Register all task + field tokens onto an existing DonutProcessor.
+
+    Mutates `processor` in place (and returns it) so a single processor — the one
+    load_model() already built — is the only source of truth for the vocabulary.
+    """
     if token2json_format:
         extra = [t for pair in _t2j_pairs() for t in pair] + [MISSING_TOKEN]
     else:

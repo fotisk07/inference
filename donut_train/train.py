@@ -11,7 +11,7 @@ import torch
 import typer
 from tqdm import tqdm
 from dataset import TASK_TOKEN, DonutDataset, load_samples, register_field_tokens
-from donut import load_model
+from donut import check_accel, load_model
 from torch.utils.data import DataLoader
 from transformers import DonutProcessor, get_linear_schedule_with_warmup
 
@@ -107,21 +107,41 @@ def save_checkpoint(model, processor, out_dir: Path, token2json_format: bool) ->
     )
 
 
+def _sync(device: str) -> None:
+    """Make GPU work finish before a timing read; no-op on CPU."""
+    if device.startswith("cuda"):
+        torch.cuda.synchronize()
+
+
 # ── Evaluation ────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module, loader: DataLoader, device: str, precision: str
-) -> float | None:
+) -> tuple[float | None, float | None]:
+    """Return (mean val loss, val compute docs/s).
+
+    Forward-only under no_grad/eval, so per-doc this is faster than a train step
+    (no backward, no optimizer). docs/s is measured over the synced compute region.
+    """
     if len(loader) == 0:
-        return None
+        return None, None
     model.eval()
     total_loss = 0.0
+    docs = 0
+    compute = 0.0
     for batch in tqdm(loader, desc="val", leave=False):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
+        _sync(device)
+        c0 = time.time()
         with autocast(device, precision):
-            total_loss += model(pixel_values=pixel_values, labels=labels).loss.item()
-    return total_loss / len(loader)
+            loss = model(pixel_values=pixel_values, labels=labels).loss
+        _sync(device)
+        compute += time.time() - c0
+        total_loss += loss.item()
+        docs += pixel_values.shape[0]
+    docs_s = docs / compute if compute > 0 else None
+    return total_loss / len(loader), docs_s
 
 
 def _seed_worker(worker_id: int) -> None:
@@ -169,6 +189,17 @@ def train(config: Config) -> None:
         "height": config.image_size[0],
         "width": config.image_size[1],
     }
+
+    # Confirm the donut optimizations are actually live in the training path, and
+    # print the real attn impls (fact, not assumption) so the bench is interpretable.
+    if not config.smoke:
+        check_accel(model, config.backend)
+    block = model.encoder.encoder.layers[0].blocks[0].attention.self
+    print(
+        f"  accel backend={config.backend}  "
+        f"encoder_sdpa_patched={getattr(block, '_sdpa_patched', False)}  "
+        f"decoder_attn={model.decoder.config._attn_implementation}"
+    )
 
     # --- data ---
     samples = load_samples(Path(config.data_json))
@@ -237,7 +268,12 @@ def train(config: Config) -> None:
         model.train()
         epoch_loss = 0.0
         docs_trained = 0
+        # Split each step's wall-time: data_fetch = waiting for the next batch from
+        # the loader; compute = H2D + fwd + bwd + opt (synced). e2e = the whole epoch.
+        data_fetch = 0.0
+        compute = 0.0
         epoch_start = time.time()
+        end = time.time()
 
         batch_bar = tqdm(
             train_loader,
@@ -245,9 +281,12 @@ def train(config: Config) -> None:
             leave=False,
         )
         for batch in batch_bar:
+            data_fetch += time.time() - end
+
+            _sync(config.device)
+            c0 = time.time()
             pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
-
             with autocast(config.device, config.precision):
                 loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
@@ -255,6 +294,8 @@ def train(config: Config) -> None:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+            _sync(config.device)
+            compute += time.time() - c0
 
             epoch_loss += loss.item()
             docs_trained += pixel_values.shape[0]
@@ -262,25 +303,43 @@ def train(config: Config) -> None:
             batch_bar.set_postfix(loss=f"{loss.item():.4f}")
             if config.mlflow_experiment:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
+            end = time.time()
 
         epoch_secs = time.time() - epoch_start
         train_loss = epoch_loss / len(train_loader)
-        docs_per_sec = docs_trained / epoch_secs
+        e2e_docs_s = docs_trained / epoch_secs
+        compute_docs_s = docs_trained / compute if compute > 0 else 0.0
+        data_bound_pct = (
+            100 * data_fetch / (data_fetch + compute)
+            if (data_fetch + compute) > 0
+            else 0.0
+        )
 
         # --- validation ---
-        val_loss = evaluate(model, val_loader, config.device, config.precision)
+        val_loss, val_docs_s = evaluate(
+            model, val_loader, config.device, config.precision
+        )
         model.train()
 
         val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
+        val_speed = f"{val_docs_s:.1f}" if val_docs_s is not None else "n/a"
         print(
             f"Epoch {epoch + 1:3d}/{config.max_epochs}"
-            f"  train={train_loss:.4f}  val={val_str}"
-            f"  │  {docs_per_sec:.1f} docs/s  {epoch_secs:.0f}s"
+            f"  train={train_loss:.4f}  val={val_str}  │  "
+            f"e2e {e2e_docs_s:.1f} doc/s  compute {compute_docs_s:.1f} doc/s  "
+            f"data-bound {data_bound_pct:.0f}%  val {val_speed} doc/s  {epoch_secs:.0f}s"
         )
         if config.mlflow_experiment:
-            metrics = {"train_loss": train_loss, "docs_per_sec": docs_per_sec}
+            metrics = {
+                "train_loss": train_loss,
+                "e2e_docs_s": e2e_docs_s,
+                "compute_docs_s": compute_docs_s,
+                "data_bound_pct": data_bound_pct,
+            }
             if val_loss is not None:
                 metrics["val_loss"] = val_loss
+            if val_docs_s is not None:
+                metrics["val_docs_s"] = val_docs_s
             mlflow.log_metrics(metrics, step=epoch + 1)
 
         # --- checkpoint: keep the best-by-val-loss ---

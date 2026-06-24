@@ -110,3 +110,39 @@ harmonic mean. Reported in two modes:
 
 Documents are also bucketed: `perfect` (no FP, no FN), `fn_only`, `fp_only`,
 `mixed`. `predict.py` prints the full per-field tables for both modes.
+
+---
+
+## Do the donut accelerations speed up *training*?
+
+The `donut` package's accel backends speed up inference. Whether they speed up
+**training** is a separate question, answered with two measurements.
+
+**Metrics — `docs/s = batch_size / Δt`**, where one *doc* = one image + its label
+sequence. The only variable is the time window Δt:
+
+- **e2e docs/s** — full step wall-time (data fetch + H2D + fwd + bwd + opt). Practical
+  training throughput.
+- **compute docs/s** — fwd + bwd + opt only, GPU-synced, no data loading.
+  Hardware-limited throughput.
+- **encoder docs/s** — encoder forward only; isolates the Swin SDPA patch.
+- **data-bound %** = data-fetch / step. If high, the dataloader is the bottleneck and
+  the backend can't move the wall clock.
+
+**1. `bench_train.py` — is the compute faster, and where?** Strips the dataloader (one
+fixed in-memory batch, reused) and times a training step per backend, broken into
+encoder / decoder fwd, backward, optimizer step, with peak memory. Prints the actual
+attn impl per component (fact, not assumption).
+
+```bash
+uv run python bench_train.py --backends baseline,eager,sdpa,fa \
+  --image-height 1280 --image-width 960 --batch-size 4
+# add --data-json /path  to also probe real dataloader throughput
+# add --tiny             to run the harness on CPU with no downloads
+```
+
+**2. `train.py` per-epoch line — does it matter end-to-end?** Every epoch prints
+`e2e`, `compute`, `data-bound %`, and `val` docs/s, and `train.py` asserts the backend
+is live (`check_accel`) + prints the attn impls. If `bench_train.py` shows compute got
+faster but the training `data-bound %` is high, the optimizations help the GPU but not
+the wall clock — the real lever is the dataloader, not the kernel.

@@ -25,6 +25,25 @@ from train import autocast
 app = typer.Typer(add_completion=False)
 
 
+def _ensure_shift_tokens(model) -> None:
+    """Set config.pad_token_id + decoder_start_token_id so a labels-forward runs.
+
+    getattr-with-default avoids AttributeError on configs that omit the key entirely
+    (older cached config.json), then falls back to the decoder sub-config / pad.
+    """
+    pad = getattr(model.config, "pad_token_id", None)
+    if pad is None:
+        pad = getattr(model.decoder.config, "pad_token_id", None) or 1
+    model.config.pad_token_id = pad
+
+    start = getattr(model.config, "decoder_start_token_id", None)
+    if start is None:
+        start = getattr(model.decoder.config, "bos_token_id", None)
+    if start is None:
+        start = pad
+    model.config.decoder_start_token_id = start
+
+
 def _attn_state(model) -> dict:
     """Actual attention impls in play — printed so we rely on fact, not theory."""
     block = model.encoder.encoder.layers[0].blocks[0].attention.self
@@ -166,6 +185,13 @@ def main(
             model_id=model_name, device=device, dtype=torch.float32, backend="baseline"
         )
         model.encoder.config.image_size = [image_height, image_width]
+
+    # A labels-forward shifts labels right using config.pad_token_id +
+    # config.decoder_start_token_id (modeling_vision_encoder_decoder.py). load_model /
+    # make_tiny_model don't guarantee both on model.config — and an old cached
+    # config.json can omit one — so set them explicitly. Values are irrelevant to
+    # timing; we only need valid ints so the forward runs.
+    _ensure_shift_tokens(model)
 
     pixel_values = make_pixel_values(model, batch_size=batch_size)
     vocab = model.decoder.config.vocab_size

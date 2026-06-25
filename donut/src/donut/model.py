@@ -1,7 +1,7 @@
 import torch
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 
-from donut.accel import apply_accel
+from donut.accel import apply_accel, _init_legacy_baseline
 from donut.constants import MODEL_ID
 
 
@@ -24,6 +24,7 @@ def load_model(
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id, dtype=dtype)
     model.to(device).eval()  # ty: ignore[invalid-argument-type]
+    _init_legacy_baseline(model)
     apply_accel(model, backend)
 
     # The pretrained checkpoint's generation_config carries a stale max_length

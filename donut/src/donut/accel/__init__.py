@@ -124,6 +124,10 @@ def check_accel(model, backend: str = "sdpa") -> None:
         check_fn(model)
 
 
+def _init_legacy_baseline(model):
+    model.decoder.config._attn_implementation = "eager"
+
+
 __all__ = [
     "DECODER_FA",
     "DECODER_SDPA",

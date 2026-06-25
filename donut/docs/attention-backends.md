@@ -92,6 +92,44 @@ the efficient backend otherwise. Efficient was chosen as the fallback
 because it had zero failures anywhere in the H100 sweep below, including
 `kv_len=1`.
 
+### Dispatch map: which flag routes to which kernel
+
+The decoder's `config._attn_implementation` string is the switch. Three
+distinct routes come out of it — and the `"fa"` preset's route does **not**
+go through PyTorch's SDPA dispatcher at all:
+
+```mermaid
+flowchart TB
+    flag["decoder.config._attn_implementation"]
+
+    flag -- "'sdpa'" --> auto["F.scaled_dot_product_attention<br/>(PyTorch dispatcher, auto-pick)"]
+    flag -- "'sdpa_flash' / 'sdpa_math' /<br/>'sdpa_efficient' / 'sdpa_cudnn'" --> forced["F.scaled_dot_product_attention<br/>wrapped in sdpa_kernel([...]) — RESTRICTED"]
+    flag -- "'flash_attention_4'  (preset 'fa')" --> fa["flash_attn.cute.flash_attn_func<br/>(CUTLASS FA4 kernel)"]
+
+    auto -- "chooses 1 by shape/dtype/mask" --> pool
+    forced -- "limited to the chosen subset" --> pool
+
+    subgraph pool["PyTorch SDPA backends"]
+        direction LR
+        math["MATH"]
+        eff["EFFICIENT"]
+        flash["FLASH<br/>(PyTorch's own)"]
+        cudnn["CUDNN"]
+    end
+
+    fa -. "separate package & kernel,<br/>NOT a PyTorch SDPA backend" .- flash
+```
+
+Two things this makes concrete: (1) `"sdpa"` and every `"sdpa_*"` preset land
+in the *same* four-backend pool — they only differ in whether PyTorch picks
+freely or is restricted; (2) `"fa"` is a genuinely different kernel from a
+different package (`flash-attn-4`), easy to confuse with the pool's `FLASH`
+entry (PyTorch's own flash implementation) but not the same code. The
+**encoder** never appears here: DonutSwin has no dispatch registry, so it's
+patched directly to `F.scaled_dot_product_attention` (see
+[encoder-optimizations.md](encoder-optimizations.md)) and always lands in the
+pool too.
+
 ## decode vs prefill: why they're completely different workloads
 
 This is the part that explains the confusing benchmark results.
@@ -203,3 +241,5 @@ plain `sdpa`'s auto-dispatch is actually converging to, rather than guessing.
   --batch-sizes --modes` to probe other shapes.
 - `scripts/bench_speed.py` — full-model benchmark across all five presets;
   `notebooks/bench.ipynb` visualizes its output.
+- [encoder-optimizations.md](encoder-optimizations.md) — how the *encoder*
+  patches (mask cache + SDPA) work, with diagrams.

@@ -11,15 +11,15 @@ Metrics (see also train.py): docs/s = batch_size / Δt.
 Component ms/step: encoder_fwd, forward_total, backward (= fwd+bwd − fwd), optim_step.
 """
 
-import json
 from pathlib import Path
 
 import torch
 import typer
 from donut import apply_accel, check_accel, load_model, revert_accel
 from donut.bench import _peak_mem_mb, time_fn
+from prettytable import PrettyTable
 from donut.synthetic import make_pixel_values, make_tiny_model
-
+from constants import MODEL_ID
 from train import autocast
 
 app = typer.Typer(add_completion=False)
@@ -42,15 +42,6 @@ def _ensure_shift_tokens(model) -> None:
     if start is None:
         start = pad
     model.config.decoder_start_token_id = start
-
-
-def _attn_state(model) -> dict:
-    """Actual attention impls in play — printed so we rely on fact, not theory."""
-    block = model.encoder.encoder.layers[0].blocks[0].attention.self
-    return {
-        "encoder_sdpa_patched": bool(getattr(block, "_sdpa_patched", False)),
-        "decoder_attn_impl": model.decoder.config._attn_implementation,
-    }
 
 
 def _bench_backend(
@@ -116,7 +107,11 @@ def _bench_backend(
 
 
 def _dataloader_probe(
-    data_json: str, batch_size: int, num_workers: int, image_size, n_batches: int
+    processor,
+    data_json: str,
+    batch_size: int,
+    num_workers: int,
+    n_batches: int,
 ) -> dict:
     """Real-data loading throughput — the practical bottleneck the compute bench hides.
 
@@ -128,10 +123,7 @@ def _dataloader_probe(
     from torch.utils.data import DataLoader
 
     from dataset import DonutDataset, load_samples
-    from transformers import DonutProcessor
 
-    processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base")
-    processor.image_processor.size = {"height": image_size[0], "width": image_size[1]}
     samples = load_samples(Path(data_json))
     ds = DonutDataset(samples, processor, max_length=128, token2json_format=True)
     loader = DataLoader(
@@ -157,7 +149,7 @@ def _dataloader_probe(
 @app.command()
 def main(
     backends: str = "baseline,eager,sdpa,fa",
-    model_name: str = "naver-clova-ix/donut-base",
+    model_name: str = MODEL_ID,
     image_height: int = 1280,
     image_width: int = 960,
     batch_size: int = 4,
@@ -207,7 +199,6 @@ def main(
         try:
             apply_accel(model, backend)
             check_accel(model, backend)
-            attn = _attn_state(model)
             stats = _bench_backend(
                 model,
                 pixel_values,
@@ -218,72 +209,59 @@ def main(
                 n_warmup=n_warmup,
                 n_runs=n_runs,
             )
-            records.append({"backend": backend, "status": "ok", **attn, **stats})
+            records.append({"backend": backend, "status": "ok", **stats})
         except Exception as e:  # noqa: BLE001 — one bad backend shouldn't abort the sweep
             records.append({"backend": backend, "status": "error", "error": str(e)})
         finally:
             revert_accel(model)
 
-    _print_table(records)
-
-    if data_json:
-        probe = _dataloader_probe(
-            data_json, batch_size, num_workers, (image_height, image_width), n_runs
-        )
-        print(
-            f"\nDataloader (real, {probe['num_workers']} workers): "
-            f"{probe['mean_batch_ms']:.1f} ms/batch  →  {probe['loader_docs_s']} docs/s"
-        )
-        print(
-            "Compare to compute docs/s above: if loader docs/s is much lower, real "
-            "training is data-bound and the backend can't move the wall clock."
-        )
-
-    if out:
-        Path(out).write_text(
-            json.dumps({"records": records, "device": device}, indent=2)
-        )
-        print(f"\nSaved → {out}")
-
-
-def _print_table(records: list[dict]) -> None:
-    cols = [
-        ("backend", 14),
-        ("enc_fwd", 9),
-        ("dec_fwd", 9),
-        ("bwd", 9),
-        ("opt", 8),
-        ("total", 9),
-        ("cmp_doc/s", 10),
-        ("enc_doc/s", 10),
-        ("peak_mb", 9),
+    table = PrettyTable()
+    table.field_names = [
+        "backend",
+        "en_fwd",
+        "dec_fwd",
+        "bwd",
+        "opt",
+        "total",
+        "cmp_doc",
+        "enc_doc",
+        "peak_mbsize",
     ]
-    header = "".join(name.rjust(w) for name, w in cols)
-    print(header)
-    print("-" * len(header))
-    for r in records:
-        if r["status"] != "ok":
-            print(f"{r['backend']:>14}  error: {r['error']}")
-            continue
-        row = [
-            r["backend"],
-            f"{r['encoder_fwd_ms']:.2f}",
-            f"{r['decoder_fwd_ms']:.2f}",
-            f"{r['backward_ms']:.2f}",
-            f"{r['optim_ms']:.2f}",
-            f"{r['total_ms']:.2f}",
-            f"{r['compute_docs_s']:.1f}",
-            f"{r['encoder_docs_s']:.1f}",
-            "—" if r["peak_mem_mb"] is None else f"{r['peak_mem_mb']:.0f}",
-        ]
-        print("".join(val.rjust(w) for val, (_, w) in zip(row, cols)))
-    print()
     for r in records:
         if r["status"] == "ok":
-            print(
-                f"  {r['backend']:>14}: encoder_sdpa_patched="
-                f"{r['encoder_sdpa_patched']}  decoder_attn={r['decoder_attn_impl']}"
+            table.add_row(
+                [
+                    r["backend"],
+                    r["encoder_fwd_ms"],
+                    r["decoder_fwd_ms"],
+                    r["backwards_ms"],
+                    r["optim_ms"],
+                    r["total_ms"],
+                    r["compute_doc_s"],
+                    r["encoder_doc_s"],
+                    "-" if r["peak_mbem_mb"] is None else r["peak_mem_mb"],
+                ]
             )
+        else:
+            table.add_row(["ERROR", *["-"] * 9])
+
+    if data_json:
+        _, processor = load_model(
+            model_id=model_name, device=device, dtype=torch.float32, backend="baseline"
+        )
+        probe = _dataloader_probe(
+            processor,
+            data_json,
+            batch_size,
+            num_workers,
+            n_runs,
+        )
+        table = PrettyTable()
+        table.field_names = ["num_workers", "mean_batch_ms", "loader_doc_s"]
+        table.add_row(
+            [probe["num_workers"], probe["mean_batch_ms"], probe["loader_doc_s"]]
+        )
+        print(table)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-"""Shared CLI plumbing for the audit/bench scripts."""
+"""Shared CLI plumbing for the audit/bench scripts: arg parsing, device/dtype
+resolution, run metadata, and result serialization."""
 
 import json
 from datetime import datetime, timezone
@@ -6,10 +7,25 @@ from pathlib import Path
 
 import torch
 import transformers
-from donut.constants import MODEL_ID
-from donut.model import load_model
 
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
+
+
+def parse_ints(s: str) -> list[int]:
+    """Parse a comma-separated string of ints, e.g. "1,2,4" -> [1, 2, 4]."""
+    return [int(tok.strip()) for tok in s.split(",") if tok.strip()]
+
+
+def parse_image_sizes(s: str) -> list[tuple[int, int]]:
+    """Parse "HxW,HxW" -> [(h, w), ...], e.g. "1280x960,1920x1440"."""
+    sizes = []
+    for token in s.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        h_str, w_str = token.split("x")
+        sizes.append((int(h_str), int(w_str)))
+    return sizes
 
 
 def resolve_device_dtype(
@@ -21,23 +37,6 @@ def resolve_device_dtype(
     else:
         torch_dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
     return device, torch_dtype
-
-
-def load_baseline_model(
-    model_id, device: str | None, dtype: str | None, tiny: bool = False
-) -> tuple[torch.nn.Module, str]:
-    """Load the model with NO accelerations applied. Returns (model, model_id)."""
-    device, torch_dtype = resolve_device_dtype(device, dtype)
-    if tiny:
-        from donut.synthetic import make_tiny_model
-
-        model = make_tiny_model(seed=0).to(device=device, dtype=torch_dtype)
-        model_id = "tiny-random-donut"
-    else:
-        model_id = model_id or MODEL_ID
-        model, _ = load_model(model_id, device, torch_dtype, backend="baseline")
-        model.to(device)  # ty: ignore[invalid-argument-type]
-    return model.eval(), model_id
 
 
 def run_meta(device: str | None, dtype: str | None, model_id: str) -> dict:

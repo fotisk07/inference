@@ -8,11 +8,11 @@
 #
 # Usage: bash scripts/exp/exp_token_scaling.sh
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 BACKENDS="baseline,eager,sdpa,sdpa_flash,sdpa_math,sdpa_efficient,sdpa_cudnn,fa"
 
-uv run python scripts/bench_speed.py \
+uv run python scripts/inference/bench_speed.py \
   --backends "$BACKENDS" \
   --image-sizes 1280x960 \
   --batch-sizes 1 \

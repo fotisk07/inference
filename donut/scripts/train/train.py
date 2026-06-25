@@ -1,19 +1,33 @@
-"""Donut fine-tuning training script."""
+"""Donut fine-tuning — owns the whole training stack: the model build, the per-epoch
+loop, evaluation, checkpointing, and the CLI. The reusable model-config helpers it
+leans on (autocast, set_shift_tokens, fit_decoder_to_vocab, set_processor_image_size)
+live in donut.model / donut.dataset; everything training-specific lives here.
+"""
 
-import json
 import random
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 import mlflow
 import torch
 import typer
-from tqdm import tqdm
-from dataset import TASK_TOKEN, DonutDataset, load_samples, register_field_tokens
-from donut import check_accel, load_model
+from prettytable import PrettyTable
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import DonutProcessor, get_linear_schedule_with_warmup
+
+from donut import check_accel
+from donut.constants import TASK_TOKEN
+from donut.dataset import (
+    DonutDataset,
+    load_samples,
+    register_field_tokens,
+    set_processor_image_size,
+)
+from donut.model import autocast, fit_decoder_to_vocab, load_model, set_shift_tokens
+from donut.runio import run_meta, save_record
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -21,10 +35,9 @@ from transformers import DonutProcessor, get_linear_schedule_with_warmup
 class Config:
     """Typed bundle of training settings, built from the CLI by `main` below.
 
-    image_size is (height, width). token2json_format=True encodes fields as
-    <s_field>value</s_field> (parseable via processor.token2json); False is the
-    legacy symmetric format. backend/precision are passed through to the donut
-    accel path. See `main` for per-flag defaults and help.
+    image_size is (height, width). Labels are encoded token2json-style as
+    <s_field>value</s_field> (parseable via processor.token2json). backend/precision
+    are passed through to the donut accel path. See `main` for per-flag defaults.
     """
 
     model_name: str
@@ -40,7 +53,6 @@ class Config:
     output_dir: str
     mlflow_experiment: str | None
     run_name: str | None
-    token2json_format: bool
     backend: str
     precision: str
     grad_clip: float
@@ -52,65 +64,55 @@ class Config:
     device: str
 
 
-# ── Precision ─────────────────────────────────────────────────────────────────
-def autocast(device: str, precision: str):
-    """bf16 autocast on CUDA when precision=="bf16"; an inert no-op otherwise."""
-    enabled = device.startswith("cuda") and precision == "bf16"
-    device_type = "cuda" if device.startswith("cuda") else "cpu"
-    return torch.autocast(
-        device_type=device_type, dtype=torch.bfloat16, enabled=enabled
-    )
-
-
-# ── Model setup ───────────────────────────────────────────────────────────────
-def build_model(cfg: "Config"):
-    """Return (model, processor) with field tokens registered and embeddings resized.
-
-    Weights load in fp32 (master weights for stable fine-tuning); bf16 compute is
-    applied at the forward via autocast(). The accel backend stays active either way.
-    """
-    if cfg.smoke:
-        from donut.synthetic import make_tiny_model
-
-        model = make_tiny_model()
-        processor = DonutProcessor.from_pretrained(cfg.model_name)
-    else:
-        model, processor = load_model(
-            model_id=cfg.model_name,
-            device=cfg.device,
-            dtype=torch.float32,
-            backend=cfg.backend,
-        )
-    register_field_tokens(processor, cfg.token2json_format)
-    model.decoder.resize_token_embeddings(len(processor.tokenizer))
-    # Canonical Donut: the task token is the decoder start (auto-prepended to the
-    # labels by shift_tokens_right); pad stays pad for loss masking / padding.
-    model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.decoder_start_token_id = processor.tokenizer.convert_tokens_to_ids(
-        TASK_TOKEN
-    )
-    return model, processor
-
-
-def save_checkpoint(model, processor, out_dir: Path, token2json_format: bool) -> None:
-    """Save a portable HF artifact (model + processor) plus a small meta sidecar.
-
-    image_size lives in the processor's image-processor config; token2json_format is
-    the one thing save_pretrained doesn't capture, so predict.py reads it back from
-    train_meta.json to pick the right output parser.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(out_dir)
-    processor.save_pretrained(out_dir)
-    (out_dir / "train_meta.json").write_text(
-        json.dumps({"token2json_format": token2json_format})
-    )
+def _seed_worker(worker_id: int) -> None:
+    """Seed each DataLoader worker so augmentation/order is reproducible."""
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
 
 
 def _sync(device: str) -> None:
     """Make GPU work finish before a timing read; no-op on CPU."""
     if device.startswith("cuda"):
         torch.cuda.synchronize()
+
+
+# ── Model setup ───────────────────────────────────────────────────────────────
+def build_model(model_name: str, device: str, backend: str, *, smoke: bool = False):
+    """Return (model, processor) ready to fine-tune: field tokens registered,
+    decoder embeddings grown to fit, and the shift-token ids set.
+
+    Weights load in fp32 (master weights for stable fine-tuning); bf16 compute is
+    applied at the forward via autocast(). In smoke mode the model is the tiny offline
+    fixture (no weight download); the processor still comes from `model_name`.
+    """
+    if smoke:
+        from donut.synthetic import make_tiny_model
+
+        model = make_tiny_model()
+        processor = DonutProcessor.from_pretrained(model_name)
+    else:
+        model, processor = load_model(
+            model_id=model_name, device=device, dtype=torch.float32, backend=backend
+        )
+    register_field_tokens(processor)
+    fit_decoder_to_vocab(model, processor)
+    # Canonical Donut: the task token is the decoder start (auto-prepended to the
+    # labels by shift_tokens_right); pad stays pad for loss masking / padding.
+    set_shift_tokens(
+        model,
+        processor.tokenizer.pad_token_id,
+        processor.tokenizer.convert_tokens_to_ids(TASK_TOKEN),
+    )
+    return model, processor
+
+
+def save_checkpoint(model, processor, out_dir: Path) -> None:
+    """Save a portable HF artifact: the model + the processor. save_pretrained
+    captures the weights, the added field tokens, image size, and decoder_start —
+    everything predict.py needs to rebuild the model, so there is no sidecar."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(out_dir)
+    processor.save_pretrained(out_dir)
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
@@ -129,7 +131,7 @@ def evaluate(
     total_loss = 0.0
     docs = 0
     compute = 0.0
-    for batch in tqdm(loader, desc="val", leave=False):
+    for batch in loader:
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
         _sync(device)
@@ -144,10 +146,37 @@ def evaluate(
     return total_loss / len(loader), docs_s
 
 
-def _seed_worker(worker_id: int) -> None:
-    """Seed each DataLoader worker so augmentation/order is reproducible."""
-    seed = torch.initial_seed() % 2**32
-    random.seed(seed)
+# ── Reporting ─────────────────────────────────────────────────────────────────
+def _print_epoch_table(records: list[dict]) -> None:
+    """Pretty per-epoch summary: loss + every docs/s window (see METRICS.md)."""
+    table = PrettyTable()
+    table.field_names = [
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "e2e d/s",
+        "compute d/s",
+        "data-bound %",
+        "val d/s",
+    ]
+
+    def f(v, fmt):
+        return format(v, fmt) if v is not None else "-"
+
+    for r in records:
+        table.add_row(
+            [
+                r["epoch"],
+                f(r["train_loss"], ".4f"),
+                f(r["val_loss"], ".4f"),
+                f(r["e2e_docs_s"], ".1f"),
+                f(r["compute_docs_s"], ".1f"),
+                f(r["data_bound_pct"], ".0f"),
+                f(r["val_docs_s"], ".1f"),
+            ]
+        )
+    print("\n── Per-epoch summary ──────────────────────────────")
+    print(table)
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
@@ -184,11 +213,13 @@ def train(config: Config) -> None:
         print("Loading tiny model (donut.synthetic, CPU, no downloads) ...")
     else:
         print(f"Loading model from {config.model_name} (backend={config.backend}) ...")
-    model, processor = build_model(config)
-    processor.image_processor.size = {
-        "height": config.image_size[0],
-        "width": config.image_size[1],
-    }
+    model, processor = build_model(
+        config.model_name,
+        config.device,
+        config.backend,
+        smoke=config.smoke,
+    )
+    set_processor_image_size(processor, config.image_size[0], config.image_size[1])
 
     # Confirm the donut optimizations are actually live in the training path, and
     # print the real attn impls (fact, not assumption) so the bench is interpretable.
@@ -214,18 +245,8 @@ def train(config: Config) -> None:
     train_samples, val_samples = samples[:split], samples[split:]
     print(f"Dataset: {len(train_samples)} train, {len(val_samples)} val")
 
-    train_ds = DonutDataset(
-        train_samples,
-        processor,
-        config.max_length,
-        token2json_format=config.token2json_format,
-    )
-    val_ds = DonutDataset(
-        val_samples,
-        processor,
-        config.max_length,
-        token2json_format=config.token2json_format,
-    )
+    train_ds = DonutDataset(train_samples, processor, config.max_length)
+    val_ds = DonutDataset(val_samples, processor, config.max_length)
     pin_memory = "cuda" in config.device
     # Deterministic shuffle order when a seed is set (not just the split).
     generator = None
@@ -260,27 +281,29 @@ def train(config: Config) -> None:
     )
     print(f"Total steps: {total_steps}  warmup: {config.warmup_steps}\n")
 
+    log_mlflow = config.mlflow_experiment is not None
+    epoch_records: list[dict] = []
     global_step = 0
     best_val_loss = float("inf")
 
     for epoch in range(config.max_epochs):
-        # --- train epoch ---
+        # --- train one epoch ---
+        # Per-step wall-time splits into data_fetch (waiting on the loader) and
+        # compute (H2D + fwd + bwd + opt, synced); the whole epoch is the e2e window.
+        # See METRICS.md.
         model.train()
         epoch_loss = 0.0
         docs_trained = 0
-        # Split each step's wall-time: data_fetch = waiting for the next batch from
-        # the loader; compute = H2D + fwd + bwd + opt (synced). e2e = the whole epoch.
+        n_steps = 0
         data_fetch = 0.0
         compute = 0.0
         epoch_start = time.time()
         end = time.time()
 
-        batch_bar = tqdm(
-            train_loader,
-            desc=f"epoch {epoch + 1}/{config.max_epochs}",
-            leave=False,
+        bar = tqdm(
+            train_loader, desc=f"epoch {epoch + 1}/{config.max_epochs}", leave=False
         )
-        for batch in batch_bar:
+        for batch in bar:
             data_fetch += time.time() - end
 
             _sync(config.device)
@@ -299,65 +322,85 @@ def train(config: Config) -> None:
 
             epoch_loss += loss.item()
             docs_trained += pixel_values.shape[0]
+            n_steps += 1
             global_step += 1
-            batch_bar.set_postfix(loss=f"{loss.item():.4f}")
-            if config.mlflow_experiment:
+            bar.set_postfix(loss=f"{loss.item():.4f}")
+            if log_mlflow:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
             end = time.time()
 
         epoch_secs = time.time() - epoch_start
-        train_loss = epoch_loss / len(train_loader)
-        e2e_docs_s = docs_trained / epoch_secs
-        compute_docs_s = docs_trained / compute if compute > 0 else 0.0
-        data_bound_pct = (
-            100 * data_fetch / (data_fetch + compute)
-            if (data_fetch + compute) > 0
-            else 0.0
-        )
 
         # --- validation ---
         val_loss, val_docs_s = evaluate(
             model, val_loader, config.device, config.precision
         )
-        model.train()
+
+        rec = {
+            "epoch": epoch + 1,
+            "train_loss": epoch_loss / n_steps if n_steps else 0.0,
+            "val_loss": val_loss,
+            "e2e_docs_s": docs_trained / epoch_secs if epoch_secs > 0 else 0.0,
+            "compute_docs_s": docs_trained / compute if compute > 0 else 0.0,
+            "data_bound_pct": (
+                100 * data_fetch / (data_fetch + compute)
+                if (data_fetch + compute) > 0
+                else 0.0
+            ),
+            "val_docs_s": val_docs_s,
+        }
+        epoch_records.append(rec)
 
         val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
         val_speed = f"{val_docs_s:.1f}" if val_docs_s is not None else "n/a"
         print(
             f"Epoch {epoch + 1:3d}/{config.max_epochs}"
-            f"  train={train_loss:.4f}  val={val_str}  │  "
-            f"e2e {e2e_docs_s:.1f} doc/s  compute {compute_docs_s:.1f} doc/s  "
-            f"data-bound {data_bound_pct:.0f}%  val {val_speed} doc/s  {epoch_secs:.0f}s"
+            f"  train={rec['train_loss']:.4f}  val={val_str}  │  "
+            f"e2e {rec['e2e_docs_s']:.1f} doc/s  compute {rec['compute_docs_s']:.1f} doc/s"
+            f"  data-bound {rec['data_bound_pct']:.0f}%  val {val_speed} doc/s"
         )
-        if config.mlflow_experiment:
-            metrics = {
-                "train_loss": train_loss,
-                "e2e_docs_s": e2e_docs_s,
-                "compute_docs_s": compute_docs_s,
-                "data_bound_pct": data_bound_pct,
-            }
-            if val_loss is not None:
-                metrics["val_loss"] = val_loss
-            if val_docs_s is not None:
-                metrics["val_docs_s"] = val_docs_s
-            mlflow.log_metrics(metrics, step=epoch + 1)
+        if log_mlflow:
+            mlflow.log_metrics(
+                {k: v for k, v in rec.items() if k != "epoch" and v is not None},
+                step=epoch + 1,
+            )
 
         # --- checkpoint: keep the best-by-val-loss ---
         if not config.smoke and val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
             best_dir = Path(config.output_dir) / "best"
-            save_checkpoint(model, processor, best_dir, config.token2json_format)
+            save_checkpoint(model, processor, best_dir)
             print(f"           saved best (val={val_loss:.4f}) → {best_dir}")
 
     # --- checkpoint: final weights ---
     if not config.smoke:
         last_dir = Path(config.output_dir) / "last"
-        save_checkpoint(model, processor, last_dir, config.token2json_format)
+        save_checkpoint(model, processor, last_dir)
         print(f"Saved last → {last_dir}")
+
+    # --- per-epoch summary table + developed JSON (named like the bench records) ---
+    _print_epoch_table(epoch_records)
+    if not config.smoke:
+        out_dir = Path(config.output_dir)
+        run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
+        name = f"train__{run_name}__{datetime.now():%Y%m%d-%H%M%S}.json"
+        save_record(
+            out_dir,
+            name,
+            {
+                "meta": run_meta(config.device, None, config.model_name),
+                "config": asdict(config),
+                "best_val_loss": best_val_loss
+                if best_val_loss != float("inf")
+                else None,
+                "epochs": epoch_records,
+            },
+        )
+        print(f"Saved metrics → {out_dir / name}")
 
     print("\nTraining complete.")
 
-    if config.mlflow_experiment:
+    if log_mlflow:
         mlflow.end_run()
 
 
@@ -384,7 +427,6 @@ def main(
     # Set an experiment name to enable MLflow logging; run_name defaults to lr+bs.
     mlflow_experiment: str | None = None,
     run_name: str | None = None,
-    token2json_format: bool = True,
     # donut accel backend, active in training: eager/sdpa/fa.
     backend: str = "sdpa",
     # On CUDA: "bf16" = fp32 master weights + bf16 autocast compute; "fp32" = all fp32.
@@ -416,7 +458,6 @@ def main(
             output_dir=output_dir,
             mlflow_experiment=mlflow_experiment,
             run_name=run_name,
-            token2json_format=token2json_format,
             backend=backend,
             precision=precision,
             grad_clip=grad_clip,

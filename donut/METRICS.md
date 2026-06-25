@@ -1,17 +1,24 @@
 # Metrics — precise definitions
 
-The speed numbers in `bench_train.py` and in `train.py`'s per-epoch line exist to
-answer one question: **do the donut accel backends speed up training?** This file
-defines every metric exactly — its formula, its time window, what is and isn't
-included, and how it's measured.
+Both donut benches — `bench_infer_step` (one `generate()` call) and
+`bench_train_step` (one `forward → backward → optimizer.step`) — plus `train.py`'s
+per-epoch line speak **one** metric: **docs/s**. They differ only in *which work
+the time window covers*, never in what the number means. This file defines every
+variant exactly — its formula, its time window, what is and isn't included, and how
+it's measured — so "compute docs/s" means the same thing whether you read it off the
+inference table or the training table.
 
 ## Vocabulary
 
-- **doc (sample)** — one document = one image (encoder input) + its label token
-  sequence (decoder target). Training is teacher-forced, so the whole label sequence
-  goes through the decoder in a **single** forward pass (no autoregressive loop).
+- **doc (sample)** — one document = one image (encoder input) + its token sequence.
+  In **training** that sequence is the label (decoder target), and teacher-forcing
+  pushes the whole sequence through the decoder in a **single** forward pass. In
+  **inference** it is the sequence the model generates autoregressively, one token
+  per step. Either way, one doc = one image + one sequence.
 - **B** — batch size (docs per step).
-- **step** — one optimizer update over a batch: `forward → backward → optimizer.step`.
+- **step** — the unit of work timed. Training: one optimizer update over a batch
+  (`forward → backward → optimizer.step`). Inference: one `generate()` call over a
+  batch (encoder forward + the autoregressive decode loop).
 - **Δt** — an elapsed time window, in seconds.
 
 ## The one formula
@@ -28,9 +35,15 @@ Every "docs/s" number is this. The only thing that differs between them is **whi
 | name             | Δt covers                                              | excludes                | where |
 |------------------|--------------------------------------------------------|-------------------------|-------|
 | **e2e docs/s**   | full step wall-time: data fetch + H2D + fwd + bwd + opt | nothing                 | `train.py` loop |
-| **compute docs/s** | H2D + fwd + bwd + opt, GPU-synced                     | data-fetch wait         | `train.py` loop **and** `bench_train.py` |
-| **encoder docs/s** | encoder forward only                                  | decoder, bwd, opt, data | `bench_train.py` |
+| **compute docs/s** | the whole step, GPU-synced — train: fwd+bwd+opt; infer: encoder+decode generate | data-fetch wait | `bench_train.py` · `bench_infer_step` · `train.py` loop |
+| **encoder docs/s** | encoder forward only                                  | decoder/decode, bwd, opt, data | `bench_train.py` · `bench_infer_step` |
 | **val docs/s**   | forward only (loss), GPU-synced, no_grad/eval          | backward, opt, data     | `train.py` `evaluate` |
+
+The same two columns — **compute docs/s** and **encoder docs/s** — appear in both
+the inference table (`scripts/inference/bench_speed.py`) and the training table
+(`scripts/train/bench_train.py`), computed by the identical formula `B / Δt`. The
+only thing that changed across them is the **step**: a `generate()` call vs a
+fwd+bwd+opt update.
 
 - **e2e** is the *practical* throughput — what a real run actually achieves, dataloader
   and all. This is the number that decides if training is faster in the real world.
@@ -71,6 +84,18 @@ separately-timed means**, they are noisier than the directly-timed regions and a
 clamped at 0 — on a fast/tiny/CPU run a derived component can read `0.00` from timing
 noise. Trust the directly-measured `encoder_fwd`, `forward`, and `total` most; read the
 derived ones as approximate attribution.
+
+`bench_infer_step` uses the **same** two-region / subtraction recipe, just simpler —
+it directly times `encoder_fwd` and the full `generate()` (`total`), then derives:
+
+```
+encoder_fwd = encoder_fwd
+decode      = total − encoder_fwd
+total       = full generate()
+```
+
+so `encoder_fwd_ms` / `decode_ms` / `total_ms` and the `compute_docs_s` /
+`encoder_docs_s` columns line up one-for-one with the training table.
 
 ## data-bound %
 

@@ -1,8 +1,10 @@
 """Speed benchmarking helpers using synthetic tensors.
 
 No real images or dataset downloads required. All functions return dicts
-suitable for JSON serialization or pandas. bench_one_config is the atomic
-per-config unit; the grid sweep over configs lives in scripts/bench_speed.py.
+suitable for JSON serialization or pandas. The two atomic units are
+bench_infer_step (one generate() call) and bench_train_step (one fwd+bwd+opt
+step); both report the same harmonized docs/s metrics (see METRICS.md). The grid
+sweep / per-backend loop over them lives in scripts/.
 """
 
 import time
@@ -10,6 +12,7 @@ import time
 import torch
 
 from donut.accel import apply_accel, check_accel, revert_accel
+from donut.model import autocast, set_encoder_image_size, set_shift_tokens
 from donut.synthetic import make_decoder_input_ids, make_pixel_values
 
 
@@ -68,92 +71,7 @@ def time_fn(fn, n_warmup: int, n_runs: int, verbose=True) -> dict:
     return res
 
 
-def bench_encoder(
-    model,
-    *,
-    batch_size: int = 1,
-    n_warmup: int = 3,
-    n_runs: int = 20,
-    seed: int = 42,
-) -> dict:
-    """Benchmark the encoder forward pass only, on synthetic pixel_values."""
-    pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
-
-    def fn():
-        with torch.no_grad():
-            model.encoder(pixel_values, return_dict=True)
-
-    stats = time_fn(fn, n_warmup, n_runs)
-    stats["images_per_s"] = round(1000 / stats["mean_ms"] * batch_size, 3)
-    stats["peak_mem_mb"] = _peak_mem_mb(fn)
-
-    return stats
-
-
-def bench_decode(
-    model,
-    *,
-    batch_size: int = 1,
-    max_new_tokens: int = 20,
-    gen_mode: str = "fixed",
-    n_warmup: int = 2,
-    n_runs: int = 10,
-    seed: int = 42,
-) -> dict:
-    """Benchmark the cached decode loop only (no encoder in the timed path).
-
-    The encoder is run once up front (untimed) and its encoder_outputs are
-    passed to generate(), which reuses them, so timing covers only the decoder.
-    End-to-end generate latency, if needed, is just encoder + decode.
-
-    gen_mode controls how many tokens are decoded:
-      "fixed" -- always emit exactly max_new_tokens (min == max). Clean per-step
-                 timing, decoupled from content; the default.
-      "eos"   -- stop naturally at EOS (capped by max_new_tokens), so latency
-                 reflects content-dependent decode length. With synthetic pixels
-                 the stopping point is model-dependent noise, so this is most
-                 meaningful when max_new_tokens is set to a representative real
-                 output length. The realized mean new-token count is reported as
-                 "new_tokens" and used for throughput.
-    """
-    pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
-    decoder_input_ids = make_decoder_input_ids(model, batch_size=batch_size)
-    prompt_len = decoder_input_ids.shape[1]
-    pad_id = model.config.decoder.pad_token_id
-    if pad_id is None:
-        pad_id = model.config.decoder.eos_token_id
-    min_new_tokens = max_new_tokens if gen_mode == "fixed" else 1
-
-    with torch.no_grad():
-        encoder_outputs = model.encoder(pixel_values, return_dict=True)
-
-    def fn():
-        with torch.no_grad():
-            return model.generate(
-                encoder_outputs=encoder_outputs,
-                decoder_input_ids=decoder_input_ids,
-                max_new_tokens=max_new_tokens,
-                min_new_tokens=min_new_tokens,
-                pad_token_id=pad_id,
-                use_cache=True,
-            )
-
-    # Realized new-token count: exact in fixed mode; measured once in eos mode.
-    if gen_mode == "fixed":
-        new_tokens = float(max_new_tokens)
-    else:
-        out = fn()
-        new_tokens = round(out.shape[1] - prompt_len, 2)
-
-    stats = time_fn(fn, n_warmup, n_runs)
-    stats["new_tokens"] = new_tokens
-    stats["tokens_per_s"] = round(1000 / stats["mean_ms"] * new_tokens * batch_size, 3)
-    stats["peak_mem_mb"] = _peak_mem_mb(fn)
-
-    return stats
-
-
-def bench_one_config(
+def bench_infer_step(
     model,
     *,
     backend: str,
@@ -161,31 +79,34 @@ def bench_one_config(
     w: int,
     batch_size: int,
     max_new_tokens: int,
-    gen_mode: str = "fixed",
-    n_runs: int = 10,
     n_warmup: int = 3,
+    n_runs: int = 10,
     seed: int = 42,
 ) -> dict:
-    """Benchmark exactly one (backend, size, batch, max_new_tokens) combo.
+    """Benchmark one inference step (encoder forward + autoregressive decode).
 
-    Self-contained: applies the backend, runs encoder + decode timing, and
-    always reverts before returning -- even on failure -- so a caller can loop
-    this over many configs on one shared model without state leaking between
-    iterations. Errors are caught and reported as a "error" status record
-    instead of raising, so one bad config doesn't abort a whole sweep.
+    Harmonized speed metric (see METRICS.md): docs/s = batch_size / Δt, where one
+    doc = one image + its generated token sequence. compute_docs_s and
+    encoder_docs_s mean exactly what they mean in the training bench -- the only
+    difference is that here the "step" is a generate() call, not fwd+bwd+opt.
     """
-    model.encoder.config.image_size = [h, w]
+    set_encoder_image_size(model, h, w)
     config = {
         "backend": backend,
         "image_height": h,
         "image_width": w,
         "batch_size": batch_size,
         "max_new_tokens": max_new_tokens,
-        "gen_mode": gen_mode,
     }
     try:
         apply_accel(model, backend)
         check_accel(model, backend)
+
+        pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
+        decoder_input_ids = make_decoder_input_ids(model, batch_size=batch_size)
+        pad_id = model.config.decoder.pad_token_id
+        if pad_id is None:
+            pad_id = model.config.decoder.eos_token_id
 
         # Untimed probe (bs=1) to read the live token counts from the model:
         # num_patches is the Swin input grid the encoder ingests; num_image_tokens
@@ -194,35 +115,159 @@ def bench_one_config(
         probe = make_pixel_values(model, batch_size=1, seed=seed)
         with torch.no_grad():
             patch_emb, _ = model.encoder.embeddings.patch_embeddings(probe)
-            enc_out = model.encoder(probe, return_dict=True)
+            enc_probe = model.encoder(probe, return_dict=True)
         config["num_patches"] = patch_emb.shape[1]
-        config["num_image_tokens"] = enc_out.last_hidden_state.shape[1]
+        config["num_image_tokens"] = enc_probe.last_hidden_state.shape[1]
 
-        encoder = bench_encoder(
-            model, batch_size=batch_size, n_warmup=n_warmup, n_runs=n_runs, seed=seed
-        )
-        decode = bench_decode(
-            model,
-            batch_size=batch_size,
-            max_new_tokens=max_new_tokens,
-            gen_mode=gen_mode,
-            n_warmup=n_warmup,
-            n_runs=n_runs,
-            seed=seed,
-        )
+        def encoder_fwd():
+            with torch.no_grad():
+                model.encoder(pixel_values, return_dict=True)
+
+        def generate_full():
+            with torch.no_grad():
+                return model.generate(
+                    pixel_values=pixel_values,
+                    decoder_input_ids=decoder_input_ids,
+                    max_new_tokens=max_new_tokens,
+                    min_new_tokens=max_new_tokens,
+                    pad_token_id=pad_id,
+                    use_cache=True,
+                )
+
+        enc = time_fn(encoder_fwd, n_warmup, n_runs, verbose=False)
+        full = time_fn(generate_full, n_warmup, n_runs, verbose=False)
+
+        encoder_ms = enc["mean_ms"]
+        total_ms = full["mean_ms"]
         return {
             **config,
             "status": "ok",
-            "encoder": encoder,
-            "decode": decode,
+            "new_tokens": float(max_new_tokens),
+            "encoder_fwd_ms": round(encoder_ms, 3),
+            "decode_ms": round(max(total_ms - encoder_ms, 0.0), 3),
+            "total_ms": round(total_ms, 3),
+            "total_p50_ms": full["p50_ms"],
+            "total_p95_ms": full["p95_ms"],
+            "compute_docs_s": round(batch_size / (total_ms / 1000), 2),
+            "encoder_docs_s": round(batch_size / (encoder_ms / 1000), 2),
+            "peak_mem_mb": _peak_mem_mb(generate_full),
         }
     except Exception as e:
+        return {**config, "status": "error", "error": str(e)}
+    finally:
+        revert_accel(model)
+
+
+def _ensure_shift_tokens(model) -> None:
+    """Set config.pad_token_id + decoder_start_token_id so a labels-forward runs.
+
+    A labels-forward shifts labels right using config.pad_token_id +
+    config.decoder_start_token_id (modeling_vision_encoder_decoder.py). load_model /
+    make_tiny_model don't guarantee both on model.config — and an old cached
+    config.json can omit one — so set them explicitly. getattr-with-default avoids
+    AttributeError on configs that omit the key entirely, then falls back to the
+    decoder sub-config / pad. Values are irrelevant to timing; we only need valid
+    ints so the forward runs.
+    """
+    pad = getattr(model.config, "pad_token_id", None)
+    if pad is None:
+        pad = getattr(model.decoder.config, "pad_token_id", None) or 1
+
+    start = getattr(model.config, "decoder_start_token_id", None)
+    if start is None:
+        start = getattr(model.decoder.config, "bos_token_id", None)
+    if start is None:
+        start = pad
+
+    set_shift_tokens(model, pad, start)
+
+
+def bench_train_step(
+    model,
+    *,
+    backend: str,
+    h: int,
+    w: int,
+    batch_size: int,
+    max_length: int,
+    precision: str = "bf16",
+    n_warmup: int = 3,
+    n_runs: int = 10,
+    seed: int = 42,
+) -> dict:
+    """Benchmark one training step for one (backend, size, batch, max_length) combo.
+    docs/s = batch_size / Δt, doc = image + its label sequence; see METRICS.md. `
+    """
+    set_encoder_image_size(model, h, w)
+    config = {
+        "backend": backend,
+        "image_height": h,
+        "image_width": w,
+        "batch_size": batch_size,
+        "max_length": max_length,
+    }
+    try:
+        _ensure_shift_tokens(model)
+        apply_accel(model, backend)
+        check_accel(model, backend)
+
+        param_device = next(model.parameters()).device
+        device = "cuda" if param_device.type == "cuda" else "cpu"
+        pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
+        vocab = model.decoder.config.vocab_size
+        gen = torch.Generator(device=param_device).manual_seed(seed)
+        labels = torch.randint(
+            0, vocab, (batch_size, max_length), device=param_device, generator=gen
+        )
+
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-9)
+
+        def encoder_fwd():
+            with torch.no_grad(), autocast(device, precision):
+                model.encoder(pixel_values)
+
+        def forward():
+            with torch.no_grad(), autocast(device, precision):
+                model(pixel_values=pixel_values, labels=labels).loss
+
+        def forward_backward():
+            optimizer.zero_grad()
+            with autocast(device, precision):
+                loss = model(pixel_values=pixel_values, labels=labels).loss
+            loss.backward()
+
+        def full_step():
+            optimizer.zero_grad()
+            with autocast(device, precision):
+                loss = model(pixel_values=pixel_values, labels=labels).loss
+            loss.backward()
+            optimizer.step()
+
+        enc = time_fn(encoder_fwd, n_warmup, n_runs, verbose=False)
+        fwd = time_fn(forward, n_warmup, n_runs, verbose=False)
+        fb = time_fn(forward_backward, n_warmup, n_runs, verbose=False)
+        full = time_fn(full_step, n_warmup, n_runs, verbose=False)
+
+        encoder_ms = enc["mean_ms"]
+        forward_ms = fwd["mean_ms"]
+        total_ms = full["mean_ms"]
         return {
             **config,
-            "status": "error",
-            "error": str(e),
-            "encoder": None,
-            "decode": None,
+            "status": "ok",
+            "encoder_fwd_ms": round(encoder_ms, 3),
+            "decoder_fwd_ms": round(max(forward_ms - encoder_ms, 0.0), 3),
+            "forward_ms": round(forward_ms, 3),
+            "backward_ms": round(max(fb["mean_ms"] - forward_ms, 0.0), 3),
+            "optim_ms": round(max(full["mean_ms"] - fb["mean_ms"], 0.0), 3),
+            "total_ms": round(total_ms, 3),
+            "total_p50_ms": full["p50_ms"],
+            "total_p95_ms": full["p95_ms"],
+            "compute_docs_s": round(batch_size / (total_ms / 1000), 2),
+            "encoder_docs_s": round(batch_size / (encoder_ms / 1000), 2),
+            "peak_mem_mb": _peak_mem_mb(full_step),
         }
+    except Exception as e:
+        return {**config, "status": "error", "error": str(e)}
     finally:
         revert_accel(model)

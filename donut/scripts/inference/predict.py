@@ -1,16 +1,25 @@
-"""Generate predictions from a fine-tuned Donut checkpoint."""
+"""Generate predictions from a fine-tuned Donut checkpoint.
+
+Orchestration only: model loading is donut.model.load_model (a checkpoint dir is just
+a model_id), output parsing is donut.dataset, scoring is donut.metrics. This CLI wires
+them together and owns the progress bar.
+"""
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import typer
-from dataset import TASK_TOKEN, load_samples, parse_prediction
-from tqdm import tqdm
-from donut import load_model
-from metrics import summarize
 from PIL import Image
+from tqdm import tqdm
+
+from donut.constants import TASK_TOKEN
+from donut.dataset import load_samples, parse_prediction
+from donut.metrics import summarize
+from donut.model import load_model
+from donut.runio import run_meta, save_record
 
 
 @dataclass
@@ -19,34 +28,11 @@ class Config:
 
     checkpoint: str  # checkpoint dir saved by train.py (e.g. checkpoints/best)
     data_json: str
-    output_json: str | None
+    out_dir: str  # directory for the metrics record JSON (named like bench records)
+    output_json: str | None  # optional: per-document {image, gt, pred} debug dump
     backend: str
     max_new_tokens: int
     device: str
-
-
-# ── Model loading ─────────────────────────────────────────────────────────────
-
-
-def load_from_checkpoint(ckpt_dir: str, backend: str, device: str):
-    """
-    Load model and processor from a checkpoint dir saved by train.save_checkpoint.
-
-    from_pretrained on the local dir restores the fine-tuned weights, the
-    added-token processor, image_size, and decoder_start — everything
-    save_pretrained persists. token2json_format (which it doesn't) is read from
-    the train_meta.json sidecar to pick the right output parser.
-    """
-    ckpt_dir = Path(ckpt_dir)
-    meta = json.loads((ckpt_dir / "train_meta.json").read_text())
-    token2json_format = meta["token2json_format"]
-
-    model, processor = load_model(
-        model_id=str(ckpt_dir), device=device, backend=backend
-    )
-    model.eval()
-
-    return model, processor, token2json_format
 
 
 # ── Inference loop ────────────────────────────────────────────────────────────
@@ -57,7 +43,6 @@ def run_predictions(
     processor,
     samples: list[dict],
     *,
-    token2json_format: bool,
     device: str,
     max_new_tokens: int = 128,
     progress: bool = True,
@@ -65,11 +50,11 @@ def run_predictions(
     """Generate field predictions for every sample.
 
     Returns [{"image", "gt": {field: value}, "pred": {field: value}}] — used both
-    for metrics.py scoring and (verbatim) as the saved --output_json.
+    for donut.metrics scoring and (verbatim) as the saved --output_json.
     """
     model.eval()
     model_dtype = next(model.parameters()).dtype
-    # Canonical Donut: the task token is the decoder start (train.build_model sets
+    # Canonical Donut: the task token is the decoder start (build_model sets
     # decoder_start_token_id = <s_donut>), so seeding generation with it matches the
     # training-time decoder input position-for-position.
     decoder_input_ids = processor.tokenizer(
@@ -92,7 +77,7 @@ def run_predictions(
             )
 
         decoded = processor.tokenizer.decode(output_ids[0], skip_special_tokens=False)
-        pred_fields = parse_prediction(decoded, token2json_format, processor)
+        pred_fields = parse_prediction(decoded, processor)
 
         # Ground truth — may be absent (inference-only mode)
         gt_fields = {
@@ -113,8 +98,8 @@ def predict(cfg: Config) -> None:
     print(f"Data       : {cfg.data_json}")
     print(f"Backend    : {cfg.backend}  device={cfg.device}\n")
 
-    model, processor, token2json_format = load_from_checkpoint(
-        cfg.checkpoint, cfg.backend, cfg.device
+    model, processor = load_model(
+        model_id=cfg.checkpoint, device=cfg.device, backend=cfg.backend
     )
 
     samples = load_samples(Path(cfg.data_json))
@@ -124,21 +109,35 @@ def predict(cfg: Config) -> None:
         model,
         processor,
         samples,
-        token2json_format=token2json_format,
         device=cfg.device,
         max_new_tokens=cfg.max_new_tokens,
     )
 
-    # Metrics — only when GT is present
+    # Metrics — only when GT is present. summarize() prints a PrettyTable and
+    # returns the data dict; persist both modes for later notebook analysis.
     if any(r["gt"] for r in results):
-        summarize(results, soft=False)
-        summarize(results, soft=True)
+        meta = run_meta(cfg.device, None, cfg.checkpoint)
+        meta["dtype"] = str(next(model.parameters()).dtype).removeprefix("torch.")
+        meta["backend"] = cfg.backend
+        record = {
+            "meta": meta,
+            "config": asdict(cfg),
+            "n_samples": len(samples),
+            "metrics": {
+                "strict": summarize(results, soft=False),
+                "soft": summarize(results, soft=True),
+            },
+        }
+        out_dir = Path(cfg.out_dir)
+        name = f"predict__{Path(cfg.checkpoint).name}__{Path(cfg.data_json).stem}__{datetime.now():%Y%m%d-%H%M%S}.json"
+        save_record(out_dir, name, record)
+        print(f"Saved metrics → {out_dir / name}")
 
-    # Save output JSON — per-document {image, gt, pred} records
+    # Optional debug dump — per-document {image, gt, pred} records
     if cfg.output_json:
         out_path = Path(cfg.output_json)
         out_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
-        print(f"Saved → {out_path}")
+        print(f"Saved predictions → {out_path}")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────--
@@ -150,7 +149,9 @@ def main(
     # Checkpoint dir saved by train.py (e.g. checkpoints/best or checkpoints/last).
     checkpoint: str,
     data_json: str = "../test_data/train.json",
-    # If given, write per-document {image, gt, pred} records to this JSON path.
+    # Directory for the metrics record JSON (one self-describing file per run).
+    out_dir: str = "results/predict",
+    # If given, also write per-document {image, gt, pred} records to this JSON path.
     output_json: str | None = None,
     backend: str = "sdpa",
     max_new_tokens: int = 128,
@@ -161,6 +162,7 @@ def main(
         Config(
             checkpoint=checkpoint,
             data_json=data_json,
+            out_dir=out_dir,
             output_json=output_json,
             backend=backend,
             max_new_tokens=max_new_tokens,

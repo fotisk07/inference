@@ -3,7 +3,7 @@
 Decoupled from the full Donut model -- isolates whether flash attention is
 theoretically faster at a given shape, independent of model/HF call overhead.
 Fixed at the real decoder's head count/head_dim so results are comparable to
-what `--backends fa` vs `--backends sdpa` actually run in scripts/bench_speed.py.
+what `--backends fa` vs `--backends sdpa` actually run in scripts/inference/bench_speed.py.
 
 "decode" mode sets query_len=1 (matches generate()'s real per-step shape
 against a growing KV cache -- the worst case for flash attention's tiling).
@@ -20,18 +20,14 @@ import torch.nn.functional as F
 import typer
 from prettytable import PrettyTable
 
-from _common import save_record
 from donut.accel import sdpa_backend
 from donut.bench import time_fn
+from donut.runio import parse_ints, save_record
 
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 SDPA_BACKENDS = ["math", "efficient", "flash", "cudnn"]
 
 app = typer.Typer()
-
-
-def _parse_ints(s: str) -> list[int]:
-    return [int(tok.strip()) for tok in s.split(",") if tok.strip()]
 
 
 def _make_qkv(batch_size, num_heads, q_len, kv_len, head_dim, dtype, device, seed):
@@ -85,8 +81,8 @@ def main(
 ) -> None:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch_dtype = DTYPES[dtype]
-    kv_len_list = _parse_ints(kv_lens)
-    batch_size_list = _parse_ints(batch_sizes)
+    kv_len_list = parse_ints(kv_lens)
+    batch_size_list = parse_ints(batch_sizes)
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]
     kernels = ["fa4"] + [f"sdpa-{b}" for b in SDPA_BACKENDS]
 

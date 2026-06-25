@@ -71,3 +71,75 @@ apply_accel(model, "sdpa")     # re-apply (idempotent)
 See [`docs/attention-backends.md`](docs/attention-backends.md) and
 [`notebooks/story.ipynb`](notebooks/story.ipynb) for the optimization details
 and benchmarks.
+
+## Fine-tuning
+
+Where everything above answers "how *fast* is the model," fine-tuning answers
+"how *accurate* is it." The dataset (`donut.dataset`) and metrics
+(`donut.metrics`) live in `src/`; the training loop itself lives in its CLI,
+`scripts/train/train.py`, which leans on small model-config helpers in
+`donut.model` (`set_shift_tokens`, `fit_decoder_to_vocab`, `autocast`). Training
+runs on top of `load_model`, so the chosen accel backend (default `sdpa`) is
+active during training too.
+
+```bash
+uv sync --extra train          # adds MLflow; base `uv sync` already covers predict
+```
+
+**Data** is one aggregate JSON — each record is a document (image path relative
+to the JSON, plus its ground-truth fields):
+
+```json
+[{"image": "images/train/doc_01.jpg",
+  "fields": [{"field_name": "BR/COMMISSION/E-mail", "annotator_text": "a@b.com"}]}]
+```
+
+Only the last `/`-segment of `field_name` is used; the field vocabulary lives in
+[`src/donut/constants.py`](src/donut/constants.py) (`TASK_TOKEN`, `FIELD_TOKENS`).
+Per-image annotations can be folded into this format with
+`scripts/train/migrate_to_aggregate_json.py`.
+
+```bash
+# 1. Smoke test — tiny offline model on CPU, seconds. Zero exit = OK.
+uv run python scripts/train/train.py --smoke
+
+# 2. Real fine-tune (downloads donut-base the first time).
+uv run python scripts/train/train.py --data-json /path/train.json --device cuda \
+  --image-height 1280 --image-width 960 --batch-size 4 --max-epochs 30 --seed 42
+
+# 3. Score a saved checkpoint (prints strict + soft P/R/F1 tables).
+uv run python scripts/inference/predict.py checkpoints/best --data-json /path/val.json
+```
+
+Checkpoints are HuggingFace `save_pretrained` dirs — `best/` (lowest val loss)
+and `last/` — each holding the model and the processor (with the registered field
+tokens and image size), so `predict.py` rebuilds the exact model from the dir.
+`train.py --help` / `predict.py --help` list every flag.
+
+### Quality
+
+Every `(document, field)` pair is scored TP / FP / FN / TN against ground truth
+(a *wrong* value is an FN, not an FP; an FP is predicting a field that has
+nothing to predict). From these: **precision**, **recall**, **F1**, reported in
+**strict** (exact) and **soft** (lowercase + trimmed) modes, plus per-document
+buckets (`perfect`, `fn_only`, `fp_only`, `mixed`).
+
+### Does accel speed up *training*?
+
+A separate question from inference. Two measurements, see
+[`METRICS.md`](METRICS.md) for exact definitions:
+
+```bash
+# Mechanism: per-backend training-step breakdown, dataloader stripped.
+uv run python scripts/train/bench_train.py --backends baseline,eager,sdpa,fa
+#   --image-sizes 1280x960,1920x1440 --batch-sizes 1,4   sweep size/batch (like bench_speed)
+#   add --data-json /path  to also probe real dataloader throughput
+#   add --tiny             to run the harness on CPU with no downloads
+
+# End-to-end: train.py prints e2e / compute / data-bound % docs/s per epoch.
+```
+
+The atomic timer is `donut.bench.bench_train_step` (twin of the inference
+`bench_infer_step`, same docs/s metric);
+if compute got faster but `data-bound %` is high, the dataloader — not the
+kernel — is the wall-clock lever.

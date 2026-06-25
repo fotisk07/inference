@@ -51,7 +51,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from dataset import FIELD_TOKENS as _FIELD_TOKENS
+from prettytable import PrettyTable
+
+from donut.constants import FIELD_TOKENS as _FIELD_TOKENS
 
 # Leaf field names derived from the token vocabulary, e.g. "<E-mail>" → "E-mail".
 # Used to enumerate every possible field for a document, which is required to
@@ -263,50 +265,76 @@ def doc_stats(results: list[dict], soft: bool = False) -> dict:
 # ── Human-readable summary ────────────────────────────────────────────────────
 
 
-def summarize(results: list[dict], soft: bool = False) -> None:
+def summarize(results: list[dict], soft: bool = False) -> dict:
     """
-    Print a human-readable metrics report to stdout.
+    Print a PrettyTable metrics report and return the underlying data dict.
 
     Suitable for both CLI use (called by predict.py) and Jupyter (call in a cell).
+    The returned dict is JSON-serializable so callers can persist it for later
+    notebook analysis.
 
     Parameters
     ----------
     results : list of {"image", "pred", "gt"} dicts
     soft    : if True, use normalized matching (lowercase + strip)
-    """
-    mode = "soft (normalized)" if soft else "strict (exact match)"
-    print(f"\n── Metrics [{mode}] ──────────────────────────────")
 
+    Returns
+    -------
+    dict with keys:
+        mode         "soft" | "strict"
+        n_with_gt    int — documents that carried ground-truth labels
+        field_stats  per-field precision/recall/f1/counts (see field_stats)
+        doc_stats    document-level category breakdown (see doc_stats)
+    """
     fstats = field_stats(results, soft=soft)
     dstats = doc_stats(results, soft=soft)
-
     n_with_gt = dstats["n_with_gt"]
+
+    summary = {
+        "mode": "soft" if soft else "strict",
+        "n_with_gt": n_with_gt,
+        "field_stats": fstats,
+        "doc_stats": dstats,
+    }
+
+    label = "soft (normalized)" if soft else "strict (exact match)"
+    print(f"\n── Metrics [{label}] ──────────────────────────────")
     if n_with_gt == 0:
         print("  No ground-truth labels found — skipping metrics.")
-        return
+        return summary
 
     def _fmt(v) -> str:
-        return f"{v:.1%}" if v is not None else "  N/A "
+        return f"{v:.1%}" if v is not None else "N/A"
 
     # Per-field table
-    print(f"\n  Per-field  (n_docs_with_gt={n_with_gt})\n")
-    header = f"  {'Field':<28}  {'Prec':>6}  {'Rec':>6}  {'F1':>6}  {'TP':>4}  {'FP':>4}  {'FN':>4}  {'TN':>4}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
-
+    field_table = PrettyTable()
+    field_table.field_names = ["Field", "Prec", "Rec", "F1", "TP", "FP", "FN", "TN"]
+    field_table.align["Field"] = "l"
     for field in sorted(fstats):
         s = fstats[field]
-        print(
-            f"  {field:<28}  {_fmt(s['precision']):>6}  {_fmt(s['recall']):>6}"
-            f"  {_fmt(s['f1']):>6}  {s['tp']:>4}  {s['fp']:>4}  {s['fn']:>4}  {s['tn']:>4}"
+        field_table.add_row(
+            [
+                field,
+                _fmt(s["precision"]),
+                _fmt(s["recall"]),
+                _fmt(s["f1"]),
+                s["tp"],
+                s["fp"],
+                s["fn"],
+                s["tn"],
+            ]
         )
+    print(f"\n  Per-field  (n_docs_with_gt={n_with_gt})")
+    print(field_table)
 
     # Document-level breakdown
-    print(f"\n  Document-level  (n={n_with_gt})\n")
-    cats = ["perfect", "fn_only", "fp_only", "mixed"]
-    for cat in cats:
+    doc_table = PrettyTable()
+    doc_table.field_names = ["Category", "Docs", "Pct"]
+    doc_table.align["Category"] = "l"
+    for cat in ["perfect", "fn_only", "fp_only", "mixed"]:
         n = dstats[cat]
-        pct = n / n_with_gt
-        bar = "█" * int(pct * 20)
-        print(f"  {cat:<12}  {n:>4}  {pct:>6.1%}  {bar}")
-    print()
+        doc_table.add_row([cat, n, f"{n / n_with_gt:.1%}"])
+    print(f"\n  Document-level  (n={n_with_gt})")
+    print(doc_table)
+
+    return summary

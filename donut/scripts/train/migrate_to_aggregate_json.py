@@ -11,13 +11,13 @@ Output (aggregate format):
         [{"image": "<path relative to output.json>", "fields": [...]}, ...]
 
 Usage:
-    uv run python migrate_to_aggregate_json.py \\
+    uv run python scripts/train/migrate_to_aggregate_json.py \\
         --images_dir /data/images/train \\
         --annotations_dir /data/annotations/train \\
         --output /data/train.json
 
     # dry run — print summary without writing
-    uv run python migrate_to_aggregate_json.py ... --dry_run
+    uv run python scripts/train/migrate_to_aggregate_json.py ... --dry_run
 """
 
 import argparse

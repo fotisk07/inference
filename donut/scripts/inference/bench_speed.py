@@ -7,24 +7,16 @@ import typer
 from prettytable import PrettyTable
 from tqdm import tqdm
 
-from _common import load_baseline_model, run_meta, save_record
-from donut.bench import bench_one_config
+from donut.bench import bench_infer_step
 from donut.constants import MODEL_ID
-
-
-def _parse_ints(s: str) -> list[int]:
-    return [int(tok.strip()) for tok in s.split(",") if tok.strip()]
-
-
-def _parse_image_sizes(s: str) -> list[tuple[int, int]]:
-    sizes = []
-    for token in s.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        h_str, w_str = token.split("x")
-        sizes.append((int(h_str), int(w_str)))
-    return sizes
+from donut.model import load_baseline_model
+from donut.runio import (
+    parse_image_sizes,
+    parse_ints,
+    resolve_device_dtype,
+    run_meta,
+    save_record,
+)
 
 
 def _filename(
@@ -48,17 +40,17 @@ def main(
     image_sizes: str = "1280x960",
     batch_sizes: str = "1",
     max_new_tokens: str = "32",
-    gen_mode: Literal["fixed", "eos"] = "fixed",
     n_runs: int = 10,
     n_warmup: int = 3,
     force: bool = False,
 ) -> None:
     backends_list = [b.strip() for b in backends.split(",") if b.strip()]
-    image_sizes_list = _parse_image_sizes(image_sizes)
-    batch_sizes_list = _parse_ints(batch_sizes)
-    max_new_tokens_list = _parse_ints(max_new_tokens)
+    image_sizes_list = parse_image_sizes(image_sizes)
+    batch_sizes_list = parse_ints(batch_sizes)
+    max_new_tokens_list = parse_ints(max_new_tokens)
 
-    model, model_id = load_baseline_model(model_id, device, dtype, tiny)
+    device, torch_dtype = resolve_device_dtype(device, dtype)
+    model, model_id = load_baseline_model(model_id, device, torch_dtype, tiny=tiny)
     meta = run_meta(device, dtype, model_id)
 
     combos = list(
@@ -77,14 +69,13 @@ def main(
             records.append(json.loads(path.read_text()))
             continue
 
-        record = bench_one_config(
+        record = bench_infer_step(
             model,
             backend=backend,
             h=h,
             w=w,
             batch_size=bs,
             max_new_tokens=mnt,
-            gen_mode=gen_mode,
             n_runs=n_runs,
             n_warmup=n_warmup,
             seed=seed,
@@ -99,12 +90,12 @@ def main(
         "bs",
         "mnt",
         "status",
-        "enc ms",
-        "img/s",
-        "enc MB",
-        "dec ms",
-        "tok/s",
-        "dec MB",
+        "en_fwd",
+        "decode",
+        "total",
+        "cmp_doc",
+        "enc_doc",
+        "peak_mb",
     ]
     for r in records:
         row_key = [
@@ -118,12 +109,12 @@ def main(
                 [
                     *row_key,
                     r["status"],
-                    r["encoder"]["mean_ms"],
-                    r["encoder"]["images_per_s"],
-                    r["encoder"]["peak_mem_mb"],
-                    r["decode"]["mean_ms"],
-                    r["decode"]["tokens_per_s"],
-                    r["decode"]["peak_mem_mb"],
+                    r["encoder_fwd_ms"],
+                    r["decode_ms"],
+                    r["total_ms"],
+                    r["compute_docs_s"],
+                    r["encoder_docs_s"],
+                    "-" if r["peak_mem_mb"] is None else r["peak_mem_mb"],
                 ]
             )
         else:

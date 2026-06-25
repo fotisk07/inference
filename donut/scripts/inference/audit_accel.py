@@ -7,8 +7,8 @@ included as a built-in sanity check: it must diff to exactly zero against
 itself, or the audit tool (not the model) has a bug.
 
 Usage:
-    uv run python scripts/audit_accel.py                # real model, auto device
-    uv run python scripts/audit_accel.py --tiny         # offline smoke run
+    uv run python scripts/inference/audit_accel.py          # real model, auto device
+    uv run python scripts/inference/audit_accel.py --tiny   # offline smoke run
 """
 
 from pathlib import Path
@@ -18,10 +18,11 @@ import torch
 import typer
 from prettytable import PrettyTable
 
-from _common import load_baseline_model, run_meta, save_record
 from donut.accel import PRESETS, apply_accel, revert_accel
 from donut.audit import diff_stats
 from donut.constants import MODEL_ID
+from donut.model import load_baseline_model
+from donut.runio import resolve_device_dtype, run_meta, save_record
 from donut.synthetic import make_pixel_values
 
 app = typer.Typer()
@@ -58,7 +59,7 @@ def audit_one_preset(
     max_new_tokens: int,
 ) -> dict:
     """Apply one preset, diff its encoder + generate() output against the
-    eager reference, then revert. Self-contained like bench_one_config.
+    eager reference, then revert. Self-contained like bench_infer_step.
     """
     try:
         apply_accel(model, preset)
@@ -89,7 +90,8 @@ def main(
     batch_size: int = 1,
     max_new_tokens: int = 32,
 ) -> None:
-    model, model_id = load_baseline_model(model_id, device, dtype, tiny)
+    device, torch_dtype = resolve_device_dtype(device, dtype)
+    model, model_id = load_baseline_model(model_id, device, torch_dtype, tiny=tiny)
     pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
 
     ref_encoder_out, ref_sequences, ref_first_logits = _encode_and_generate(

@@ -14,6 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 fa4 = ["flash-attn-4>=4.0.0b15"]
+# Fine-tuning extra: only MLflow is training-exclusive. tqdm/pillow/transformers
+# are already core deps, so `uv sync` (no extra) covers inference incl. predict.
+train = ["mlflow>=3.13.0"]
 
 [dependency-groups]
 dev = [

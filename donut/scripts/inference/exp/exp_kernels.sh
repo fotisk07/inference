@@ -9,9 +9,9 @@
 #
 # Usage: bash scripts/exp/exp_kernels.sh
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
-uv run python scripts/bench_attention_kernels.py \
+uv run python scripts/inference/bench_attention_kernels.py \
   --kv-lens 1,8,32,128,512,2048,4096 \
   --batch-sizes 1,8,32 \
   --modes decode,prefill \

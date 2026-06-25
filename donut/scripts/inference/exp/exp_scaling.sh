@@ -8,11 +8,11 @@
 #
 # Usage: bash scripts/exp/exp_scaling.sh
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 
 BACKENDS="baseline,eager,sdpa,sdpa_flash,sdpa_math,sdpa_efficient,sdpa_cudnn,fa"
 
-uv run python scripts/bench_speed.py \
+uv run python scripts/inference/bench_speed.py \
   --backends "$BACKENDS" \
   --image-sizes 1280x960,1920x1440,2560x1920 \
   --batch-sizes 1,2,4,8 \

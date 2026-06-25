@@ -14,6 +14,7 @@ Component ms/step: encoder_fwd, decoder_fwd, backward, optim_step.
 """
 
 import itertools
+import json
 import time
 from pathlib import Path
 
@@ -21,12 +22,18 @@ import torch
 import typer
 from prettytable import PrettyTable
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from donut.bench import bench_train_step
 from donut.constants import DEFAULT_MAX_LENGTH, MODEL_ID
 from donut.dataset import DonutDataset, load_samples
 from donut.model import load_baseline_model, load_model
-from donut.runio import parse_image_sizes, parse_ints
+from donut.runio import parse_image_sizes, parse_ints, run_meta, save_record
+
+
+def _filename(backend: str, h: int, w: int, batch_size: int, max_length: int) -> str:
+    return f"{backend}__{h}x{w}__bs{batch_size}__ml{max_length}.json"
+
 
 app = typer.Typer(add_completion=False)
 
@@ -67,37 +74,54 @@ def _dataloader_probe(
 
 @app.command()
 def main(
+    model_id: str = MODEL_ID,
+    device: str | None = None,
+    # Training-specific: fp32 master weights, bf16 compute via autocast (vs the
+    # inference bench's --dtype sweep). "bf16" = autocast on CUDA; "fp32" = off.
+    precision: str = "bf16",
+    seed: int = 42,
+    out: Path = Path("results/bench_train"),
+    tiny: bool = False,
     backends: str = "baseline,eager,sdpa,fa",
-    model_name: str = MODEL_ID,
     image_sizes: str = "1280x960",
     batch_sizes: str = "1",
     max_length: int = DEFAULT_MAX_LENGTH,
-    precision: str = "bf16",
-    n_warmup: int = 3,
     n_runs: int = 10,
-    seed: int = 42,
-    # Tiny offline model on CPU — proves the harness without downloads or a GPU.
-    tiny: bool = False,
-    # If given, also probe real dataloader throughput (the practical bottleneck).
+    n_warmup: int = 3,
+    force: bool = False,
+    # Training-specific: if given, also probe real dataloader throughput.
     data_json: str | None = None,
     num_workers: int = 4,
-    device: str | None = None,
 ) -> None:
     """Per-backend training-step timing breakdown (compute-only, dataloader removed)."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    backend_list = [b.strip() for b in backends.split(",") if b.strip()]
+    backends_list = [b.strip() for b in backends.split(",") if b.strip()]
     image_sizes_list = parse_image_sizes(image_sizes)
     batch_sizes_list = parse_ints(batch_sizes)
 
-    # baseline load (no accel); each backend is applied/reverted per combo.
-    model, _ = load_baseline_model(model_name, device, torch.float32, tiny=tiny)
+    # fp32 master weights (no accel); each backend is applied/reverted per combo.
+    # bf16 compute is applied at the forward via autocast, controlled by --precision.
+    model, model_id = load_baseline_model(model_id, device, torch.float32, tiny=tiny)
+    meta = run_meta(device, "f32", model_id)
+    meta["precision"] = precision
 
     print(
         f"\nTraining-step bench  device={device}  precision={precision}  ml={max_length}\n"
     )
 
-    records = [
-        bench_train_step(
+    combos = list(itertools.product(backends_list, image_sizes_list, batch_sizes_list))
+    records = []
+    progress = tqdm(combos, desc="bench grid")
+    for backend, (h, w), bs in progress:
+        name = _filename(backend, h, w, bs, max_length)
+        progress.set_postfix_str(name)
+        path = out / name
+        if path.exists() and not force:
+            tqdm.write(f"skip (exists): {name}")
+            records.append(json.loads(path.read_text()))
+            continue
+
+        record = bench_train_step(
             model,
             backend=backend,
             h=h,
@@ -109,10 +133,8 @@ def main(
             n_runs=n_runs,
             seed=seed,
         )
-        for backend, (h, w), bs in itertools.product(
-            backend_list, image_sizes_list, batch_sizes_list
-        )
-    ]
+        save_record(out, name, {**meta, **record})
+        records.append(record)
 
     table = PrettyTable()
     table.field_names = [
@@ -156,7 +178,7 @@ def main(
 
     if data_json:
         _, processor = load_model(
-            model_id=model_name, device=device, dtype=torch.float32, backend="baseline"
+            model_id=model_id, device=device, dtype=torch.float32, backend="baseline"
         )
         probe = _dataloader_probe(
             processor,

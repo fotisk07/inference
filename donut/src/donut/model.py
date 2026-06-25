@@ -76,6 +76,25 @@ def set_encoder_image_size(model, height: int, width: int) -> None:
     model.encoder.config.image_size = [height, width]
 
 
+def set_processor_image_size(
+    processor: DonutProcessor, height: int, width: int
+) -> None:
+    """Set the resolution the image processor resizes real input images to."""
+    processor.image_processor.size = {"height": height, "width": width}
+
+
+def set_image_size(model, processor, height: int, width: int) -> None:
+    """Set the input resolution on BOTH sinks at once.
+
+    The processor (resizes real images) and the encoder config (the model's
+    record of its input size) are two independent places the resolution lives;
+    writing only one leaves a saved checkpoint internally inconsistent. This is
+    the single entry point training/inference should use so they never drift.
+    """
+    set_processor_image_size(processor, height, width)
+    set_encoder_image_size(model, height, width)
+
+
 def load_baseline_model(
     model_id: str = MODEL_ID,
     device: str | None = None,

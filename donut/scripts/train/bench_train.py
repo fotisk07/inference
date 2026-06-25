@@ -23,7 +23,7 @@ from prettytable import PrettyTable
 from torch.utils.data import DataLoader
 
 from donut.bench import bench_train_step
-from donut.constants import MODEL_ID
+from donut.constants import DEFAULT_MAX_LENGTH, MODEL_ID
 from donut.dataset import DonutDataset, load_samples
 from donut.model import load_baseline_model, load_model
 from donut.runio import parse_image_sizes, parse_ints
@@ -44,7 +44,7 @@ def _dataloader_probe(
     training is data-bound and the backend choice can't move the wall clock.
     """
     samples = load_samples(Path(data_json))
-    ds = DonutDataset(samples, processor, max_length=128)
+    ds = DonutDataset(samples, processor, max_length=DEFAULT_MAX_LENGTH)
     loader = DataLoader(
         ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
     )
@@ -71,7 +71,7 @@ def main(
     model_name: str = MODEL_ID,
     image_sizes: str = "1280x960",
     batch_sizes: str = "1",
-    max_length: int = 128,
+    max_length: int = DEFAULT_MAX_LENGTH,
     precision: str = "bf16",
     n_warmup: int = 3,
     n_runs: int = 10,

@@ -6,7 +6,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import DonutProcessor
 
-from donut.constants import FIELD_TOKENS, MISSING_TOKEN, TASK_TOKEN
+from donut.constants import DEFAULT_MAX_LENGTH, FIELD_TOKENS, MISSING_TOKEN, TASK_TOKEN
 
 ### Vocabulary ###########################################################
 
@@ -30,13 +30,6 @@ def register_field_tokens(processor: DonutProcessor) -> DonutProcessor:
         {"additional_special_tokens": [TASK_TOKEN] + extra}
     )
     return processor
-
-
-def set_processor_image_size(
-    processor: DonutProcessor, height: int, width: int
-) -> None:
-    """Set the resolution the image processor resizes real input images to."""
-    processor.image_processor.size = {"height": height, "width": width}
 
 
 ### Label encoding ###########################################################
@@ -146,7 +139,7 @@ class DonutDataset(Dataset):
         self,
         samples: list[dict],
         processor: DonutProcessor,
-        max_length: int = 128,
+        max_length: int = DEFAULT_MAX_LENGTH,
     ):
         self.samples = samples
         self.processor = processor

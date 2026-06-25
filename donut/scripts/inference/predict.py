@@ -15,11 +15,14 @@ import typer
 from PIL import Image
 from tqdm import tqdm
 
-from donut.constants import TASK_TOKEN
+from donut.constants import DEFAULT_MAX_NEW_TOKENS, TASK_TOKEN
 from donut.dataset import load_samples, parse_prediction
 from donut.metrics import summarize
 from donut.model import load_model
 from donut.runio import run_meta, save_record
+
+# Repo root (…/inference) so the default --data-json resolves no matter the CWD.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass
@@ -44,7 +47,7 @@ def run_predictions(
     samples: list[dict],
     *,
     device: str,
-    max_new_tokens: int = 128,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     progress: bool = True,
 ) -> list[dict]:
     """Generate field predictions for every sample.
@@ -148,13 +151,13 @@ app = typer.Typer(add_completion=False)
 def main(
     # Checkpoint dir saved by train.py (e.g. checkpoints/best or checkpoints/last).
     checkpoint: str,
-    data_json: str = "../test_data/train.json",
+    data_json: str = str(_REPO_ROOT / "test_data" / "train.json"),
     # Directory for the metrics record JSON (one self-describing file per run).
     out_dir: str = "results/predict",
     # If given, also write per-document {image, gt, pred} records to this JSON path.
     output_json: str | None = None,
     backend: str = "sdpa",
-    max_new_tokens: int = 128,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     device: str | None = None,
 ) -> None:
     """Score a fine-tuned Donut checkpoint on labelled data."""

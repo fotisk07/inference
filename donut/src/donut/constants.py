@@ -1,5 +1,12 @@
 MODEL_ID = "naver-clova-ix/donut-base"
 
+# ── Canonical defaults ────────────────────────────────────────────────────────
+# The single source of truth for the fine-tuning resolution and decode length.
+# Sweep scripts (bench_speed) override these with their own experiment ranges.
+DEFAULT_IMAGE_SIZE = (1280, 960)  # (height, width) the encoder/processor run at
+DEFAULT_MAX_NEW_TOKENS = 128  # inference generation budget (predict.py)
+DEFAULT_MAX_LENGTH = 128  # training decoder sequence length (dataset/train)
+
 # ── Fine-tuning vocabulary ────────────────────────────────────────────────────
 # Task token used as the decoder start (canonical Donut convention) and the set
 # of extraction fields. The dataset/metrics/training code registers these onto

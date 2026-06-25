@@ -1,6 +1,6 @@
 """Donut fine-tuning — owns the whole training stack: the model build, the per-epoch
 loop, evaluation, checkpointing, and the CLI. The reusable model-config helpers it
-leans on (autocast, set_shift_tokens, fit_decoder_to_vocab, set_processor_image_size)
+leans on (autocast, set_shift_tokens, fit_decoder_to_vocab, set_image_size)
 live in donut.model / donut.dataset; everything training-specific lives here.
 """
 
@@ -19,15 +19,28 @@ from tqdm import tqdm
 from transformers import DonutProcessor, get_linear_schedule_with_warmup
 
 from donut import check_accel
-from donut.constants import TASK_TOKEN
+from donut.constants import (
+    DEFAULT_IMAGE_SIZE,
+    DEFAULT_MAX_LENGTH,
+    MODEL_ID,
+    TASK_TOKEN,
+)
 from donut.dataset import (
     DonutDataset,
     load_samples,
     register_field_tokens,
-    set_processor_image_size,
 )
-from donut.model import autocast, fit_decoder_to_vocab, load_model, set_shift_tokens
+from donut.model import (
+    autocast,
+    fit_decoder_to_vocab,
+    load_model,
+    set_image_size,
+    set_shift_tokens,
+)
 from donut.runio import run_meta, save_record
+
+# Repo root (…/inference) so the default --data-json resolves no matter the CWD.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -219,7 +232,7 @@ def train(config: Config) -> None:
         config.backend,
         smoke=config.smoke,
     )
-    set_processor_image_size(processor, config.image_size[0], config.image_size[1])
+    set_image_size(model, processor, config.image_size[0], config.image_size[1])
 
     # Confirm the donut optimizations are actually live in the training path, and
     # print the real attn impls (fact, not assumption) so the bench is interpretable.
@@ -410,13 +423,13 @@ app = typer.Typer(add_completion=False)
 
 @app.command()
 def main(
-    model_name: str = "naver-clova-ix/donut-base",
-    data_json: str = "../test_data/train.json",
+    model_name: str = MODEL_ID,
+    data_json: str = str(_REPO_ROOT / "test_data" / "train.json"),
     val_split: float = 0.2,
     # (height, width) fed to the encoder; lower = faster + less VRAM, less legible.
-    image_height: int = 1280,
-    image_width: int = 960,
-    max_length: int = 128,
+    image_height: int = DEFAULT_IMAGE_SIZE[0],
+    image_width: int = DEFAULT_IMAGE_SIZE[1],
+    max_length: int = DEFAULT_MAX_LENGTH,
     batch_size: int = 4,
     num_workers: int = 4,
     lr: float = 3e-4,

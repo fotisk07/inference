@@ -140,7 +140,7 @@ def evaluate(
     total_loss = 0.0
     docs = 0
     compute = 0.0
-    for batch in loader:
+    for batch in tqdm(loader, desc="validation", leave=False):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
         _sync(device)

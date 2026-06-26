@@ -102,8 +102,7 @@ def load_baseline_model(
     *,
     tiny: bool = False,
 ) -> tuple[VisionEncoderDecoderModel, str]:
-    """Load a model with NO accelerations applied — the single source of truth for
-    the benchmarking scripts, which apply/revert each backend themselves.
+    """Load a model with NO accelerations applied
 
     tiny=True returns the offline random fixture (donut.synthetic.make_tiny_model,
     no download, id "tiny-random-donut"); otherwise the real checkpoint loaded with

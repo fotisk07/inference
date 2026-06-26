@@ -161,6 +161,11 @@ def docs_per_s(n: int, secs: float) -> float | None:
     return n / secs if secs > 0 else None
 
 
+def _round(x: float | None, n: int) -> float | None:
+    """Round for clean records/printing; pass None through."""
+    return round(x, n) if x is not None else None
+
+
 @dataclass
 class EpochStats:
     """Accumulators for one epoch + the single home for the per-epoch metric math.
@@ -183,17 +188,24 @@ class EpochStats:
     def record(
         self, epoch: int, val_loss: float | None, val_docs_s: float | None
     ) -> dict:
+        overhead = self.wall - self.data_fetch - self.compute
         pct = (lambda t: 100 * t / self.wall) if self.wall > 0 else (lambda t: 0.0)
         return {
             "epoch": epoch,
-            "train_loss": self.loss_sum / self.steps if self.steps else 0.0,
-            "val_loss": val_loss,
-            "e2e_docs_s": docs_per_s(self.docs, self.wall),
-            "compute_docs_s": docs_per_s(self.docs, self.compute),
-            "data_pct": pct(self.data_fetch),
-            "compute_pct": pct(self.compute),
-            "overhead_pct": pct(self.wall - self.data_fetch - self.compute),
-            "val_docs_s": val_docs_s,
+            "train_loss": round(self.loss_sum / self.steps, 4) if self.steps else 0.0,
+            "val_loss": _round(val_loss, 4),
+            "e2e_docs_s": _round(docs_per_s(self.docs, self.wall), 2),
+            "compute_docs_s": _round(docs_per_s(self.docs, self.compute), 2),
+            "val_docs_s": _round(val_docs_s, 2),
+            # epoch wall split, in seconds (wall = compute + data + overhead)
+            "wall_s": round(self.wall, 3),
+            "compute_s": round(self.compute, 3),
+            "data_s": round(self.data_fetch, 3),
+            "overhead_s": round(overhead, 3),
+            # same split as % of the wall (e2e = 100 = compute% + data% + overhead%)
+            "compute_pct": round(pct(self.compute), 1),
+            "data_pct": round(pct(self.data_fetch), 1),
+            "overhead_pct": round(pct(overhead), 1),
         }
 
 
@@ -206,9 +218,10 @@ def _print_epoch_table(records: list[dict]) -> None:
         "val_loss",
         "e2e d/s",
         "compute d/s",
+        "val d/s",
+        "compute %",
         "data %",
         "overhead %",
-        "val d/s",
     ]
 
     def f(v, fmt):
@@ -222,9 +235,10 @@ def _print_epoch_table(records: list[dict]) -> None:
                 f(r["val_loss"], ".4f"),
                 f(r["e2e_docs_s"], ".1f"),
                 f(r["compute_docs_s"], ".1f"),
+                f(r["val_docs_s"], ".1f"),
+                f(r["compute_pct"], ".0f"),
                 f(r["data_pct"], ".0f"),
                 f(r["overhead_pct"], ".0f"),
-                f(r["val_docs_s"], ".1f"),
             ]
         )
     print("\n── Per-epoch summary ──────────────────────────────")
@@ -394,11 +408,13 @@ def train(config: Config) -> None:
         e2e = rec["e2e_docs_s"] or 0.0
         compute_ds = rec["compute_docs_s"] or 0.0
         print(
-            f"Epoch {epoch + 1:3d}/{config.max_epochs}"
-            f"  train={rec['train_loss']:.4f}  val={val_str}  │  "
-            f"e2e {e2e:.1f} doc/s  compute {compute_ds:.1f} doc/s"
-            f"  data {rec['data_pct']:.0f}% overhead {rec['overhead_pct']:.0f}%"
-            f"  val {val_speed} doc/s"
+            f"Epoch {epoch + 1:3d}/{config.max_epochs}  "
+            f"train={rec['train_loss']:.4f}  val={val_str}\n"
+            f"  throughput : e2e {e2e:.1f}  compute {compute_ds:.1f}  val {val_speed}  doc/s\n"
+            f"  epoch time : {rec['wall_s']:.1f}s = compute {rec['compute_s']:.1f}"
+            f" + data {rec['data_s']:.1f} + overhead {rec['overhead_s']:.1f}\n"
+            f"  budget %   : e2e 100 = compute {rec['compute_pct']:.0f}"
+            f" + data {rec['data_pct']:.0f} + overhead {rec['overhead_pct']:.0f}"
         )
         if log_mlflow:
             mlflow.log_metrics(

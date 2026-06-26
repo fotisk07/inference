@@ -156,6 +156,47 @@ def evaluate(
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
+def docs_per_s(n: int, secs: float) -> float | None:
+    """The one throughput formula (see METRICS.md): docs/s = n / Δt."""
+    return n / secs if secs > 0 else None
+
+
+@dataclass
+class EpochStats:
+    """Accumulators for one epoch + the single home for the per-epoch metric math.
+
+    The wall clock splits three ways (all over `wall`, summing to 100%):
+      data%     — waiting on the DataLoader (`data_fetch`)
+      compute%  — synced H2D+fwd+bwd+opt (`compute`)
+      overhead% — everything else: per-step .item()/postfix/mlflow/sync
+    `compute% == e2e_docs_s / compute_docs_s`, so the e2e↔compute gap is exactly
+    `data% + overhead%` — not the dataloader alone.
+    """
+
+    data_fetch: float = 0.0  # wall waiting on the loader
+    compute: float = 0.0  # synced H2D+fwd+bwd+opt
+    wall: float = 0.0  # full epoch wall clock
+    docs: int = 0
+    steps: int = 0
+    loss_sum: float = 0.0  # python-side (per-step .item() kept)
+
+    def record(
+        self, epoch: int, val_loss: float | None, val_docs_s: float | None
+    ) -> dict:
+        pct = (lambda t: 100 * t / self.wall) if self.wall > 0 else (lambda t: 0.0)
+        return {
+            "epoch": epoch,
+            "train_loss": self.loss_sum / self.steps if self.steps else 0.0,
+            "val_loss": val_loss,
+            "e2e_docs_s": docs_per_s(self.docs, self.wall),
+            "compute_docs_s": docs_per_s(self.docs, self.compute),
+            "data_pct": pct(self.data_fetch),
+            "compute_pct": pct(self.compute),
+            "overhead_pct": pct(self.wall - self.data_fetch - self.compute),
+            "val_docs_s": val_docs_s,
+        }
+
+
 def _print_epoch_table(records: list[dict]) -> None:
     """Pretty per-epoch summary: loss + every docs/s window (see METRICS.md)."""
     table = PrettyTable()
@@ -165,7 +206,8 @@ def _print_epoch_table(records: list[dict]) -> None:
         "val_loss",
         "e2e d/s",
         "compute d/s",
-        "data-bound %",
+        "data %",
+        "overhead %",
         "val d/s",
     ]
 
@@ -180,7 +222,8 @@ def _print_epoch_table(records: list[dict]) -> None:
                 f(r["val_loss"], ".4f"),
                 f(r["e2e_docs_s"], ".1f"),
                 f(r["compute_docs_s"], ".1f"),
-                f(r["data_bound_pct"], ".0f"),
+                f(r["data_pct"], ".0f"),
+                f(r["overhead_pct"], ".0f"),
                 f(r["val_docs_s"], ".1f"),
             ]
         )
@@ -304,21 +347,16 @@ def train(config: Config) -> None:
         # compute (H2D + fwd + bwd + opt, synced); the whole epoch is the e2e window.
         # See METRICS.md.
         model.train()
-        epoch_loss = 0.0
-        docs_trained = 0
-        n_steps = 0
-        data_fetch = 0.0
-        compute = 0.0
-        epoch_start = time.time()
+        stats = EpochStats()
+        wall_start = time.time()
         end = time.time()
 
         bar = tqdm(
             train_loader, desc=f"epoch {epoch + 1}/{config.max_epochs}", leave=False
         )
         for batch in bar:
-            data_fetch += time.time() - end
+            stats.data_fetch += time.time() - end
 
-            _sync(config.device)
             c0 = time.time()
             pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
@@ -330,46 +368,37 @@ def train(config: Config) -> None:
             scheduler.step()
             optimizer.zero_grad()
             _sync(config.device)
-            compute += time.time() - c0
+            stats.compute += time.time() - c0
 
-            epoch_loss += loss.item()
-            docs_trained += pixel_values.shape[0]
-            n_steps += 1
+            stats.loss_sum += loss.item()
+            stats.docs += pixel_values.shape[0]
+            stats.steps += 1
             global_step += 1
             bar.set_postfix(loss=f"{loss.item():.4f}")
             if log_mlflow:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
             end = time.time()
 
-        epoch_secs = time.time() - epoch_start
+        stats.wall = time.time() - wall_start
 
         # --- validation ---
         val_loss, val_docs_s = evaluate(
             model, val_loader, config.device, config.precision
         )
 
-        rec = {
-            "epoch": epoch + 1,
-            "train_loss": epoch_loss / n_steps if n_steps else 0.0,
-            "val_loss": val_loss,
-            "e2e_docs_s": docs_trained / epoch_secs if epoch_secs > 0 else 0.0,
-            "compute_docs_s": docs_trained / compute if compute > 0 else 0.0,
-            "data_bound_pct": (
-                100 * data_fetch / (data_fetch + compute)
-                if (data_fetch + compute) > 0
-                else 0.0
-            ),
-            "val_docs_s": val_docs_s,
-        }
+        rec = stats.record(epoch + 1, val_loss, val_docs_s)
         epoch_records.append(rec)
 
         val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
         val_speed = f"{val_docs_s:.1f}" if val_docs_s is not None else "n/a"
+        e2e = rec["e2e_docs_s"] or 0.0
+        compute_ds = rec["compute_docs_s"] or 0.0
         print(
             f"Epoch {epoch + 1:3d}/{config.max_epochs}"
             f"  train={rec['train_loss']:.4f}  val={val_str}  │  "
-            f"e2e {rec['e2e_docs_s']:.1f} doc/s  compute {rec['compute_docs_s']:.1f} doc/s"
-            f"  data-bound {rec['data_bound_pct']:.0f}%  val {val_speed} doc/s"
+            f"e2e {e2e:.1f} doc/s  compute {compute_ds:.1f} doc/s"
+            f"  data {rec['data_pct']:.0f}% overhead {rec['overhead_pct']:.0f}%"
+            f"  val {val_speed} doc/s"
         )
         if log_mlflow:
             mlflow.log_metrics(

@@ -97,20 +97,40 @@ total       = full generate()
 so `encoder_fwd_ms` / `decode_ms` / `total_ms` and the `compute_docs_s` /
 `encoder_docs_s` columns line up one-for-one with the training table.
 
-## data-bound %
+## Wall-clock split: data % / compute % / overhead %
+
+The epoch wall (`epoch_secs`, the **e2e** window) splits **three** ways — all measured
+in the `train.py` loop, all over `epoch_secs`, summing to 100 %:
 
 ```
-data-bound % = data_fetch / (data_fetch + compute) × 100
+data %     = data_fetch                       / epoch_secs × 100
+compute %  = compute                          / epoch_secs × 100
+overhead % = (epoch_secs − data_fetch − compute) / epoch_secs × 100
 ```
 
-Measured in the `train.py` loop. `data_fetch` is the wall-time spent *waiting for the
-next batch* from the DataLoader; `compute` is the synced H2D+fwd+bwd+opt region. If this
-is high, the dataloader — not the GPU — is the bottleneck, so **e2e docs/s stays flat
-across backends even when compute docs/s improves**. That is the situation a kernel
-optimization cannot fix.
+- `data_fetch` — wall-time *waiting for the next batch* from the DataLoader.
+- `compute` — the synced H2D+fwd+bwd+opt region.
+- **overhead** — everything else the wall clock contains but neither bucket times:
+  per-step `loss.item()`, the tqdm postfix, per-step mlflow logging, the step sync.
 
-`bench_train.py --data-json …` adds a standalone **loader docs/s** (real images through
-`DonutDataset`); comparing it to compute docs/s shows the same thing from the bench side.
+Because `compute` is a **sub-interval** of the epoch wall, `compute_docs_s ≥ e2e_docs_s`
+**always**, and the two are tied by an exact identity:
+
+```
+compute % = e2e_docs_s / compute_docs_s × 100
+```
+
+So the gap between e2e and compute throughput is exactly `data % + overhead %`. A low
+`data %` with a large e2e↔compute gap is not a contradiction — the gap is **overhead**,
+not the dataloader. Use the three buckets to attribute it:
+
+- high **data %** → dataloader-bound: **e2e docs/s stays flat across backends even when
+  compute docs/s improves** (a kernel optimization cannot fix it).
+- high **overhead %** → per-step Python/logging/sync cost dominates the wall.
+- both low → e2e ≈ compute: the GPU step is the wall, and accel backends move it.
+
+`bench_loader.py` measures a standalone **loader docs/s** (real images through
+`DonutDataset`); comparing it to compute docs/s shows the data side from the bench.
 
 ## How it's measured
 
@@ -136,5 +156,6 @@ The accel "speeds up training" iff a backend lowers the **total** step time (rai
 **encoder docs/s** (the Swin patch is the only encoder difference; the decoder is the
 same SDPA path in every backend including baseline — the bench prints each component's
 attn impl to confirm). Whether that compute win shows up in real training is answered by
-**e2e docs/s** and **data-bound %**: a high data-bound % means the win is hidden behind
-the dataloader.
+**e2e docs/s** and the **data % / overhead %** split: a high data % means the win is
+hidden behind the dataloader; a high overhead % means it's hidden behind per-step
+Python/logging cost.

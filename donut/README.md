@@ -133,13 +133,15 @@ A separate question from inference. Two measurements, see
 # Mechanism: per-backend training-step breakdown, dataloader stripped.
 uv run python scripts/train/bench_train.py --backends baseline,eager,sdpa,fa
 #   --image-sizes 1280x960,1920x1440 --batch-sizes 1,4   sweep size/batch (like bench_speed)
-#   add --probe-data-json /path  to also probe real dataloader throughput
 #   add --tiny             to run the harness on CPU with no downloads
 
-# End-to-end: train.py prints e2e / compute / data-bound % docs/s per epoch.
+# Dataloader: standalone real-data loading throughput (the bottleneck bench_train strips).
+uv run python scripts/train/bench_loader.py /path/to/data.json --num-workers 0,4,8
+
+# End-to-end: train.py prints e2e / compute docs/s + data % / overhead % per epoch.
 ```
 
 The atomic timer is `donut.bench.bench_train_step` (twin of the inference
 `bench_infer_step`, same docs/s metric);
-if compute got faster but `data-bound %` is high, the dataloader — not the
-kernel — is the wall-clock lever.
+if compute got faster but `data %` is high, the dataloader — not the kernel —
+is the wall-clock lever (a high `overhead %` instead points at per-step Python cost).

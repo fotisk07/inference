@@ -2,7 +2,7 @@ import torch
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 
 from donut.accel import apply_accel, _init_legacy_baseline
-from donut.constants import MODEL_ID
+from donut.constants import MODEL_ID, TASK_TOKEN
 
 
 def load_model(
@@ -93,6 +93,75 @@ def set_image_size(model, processor, height: int, width: int) -> None:
     """
     set_processor_image_size(processor, height, width)
     set_encoder_image_size(model, height, width)
+
+
+# ── Shift tokens (pad + decoder_start) ────────────────────────────────────────
+# A teacher-forced labels-forward and generate() both need config.pad_token_id and
+# config.decoder_start_token_id (modeling_vision_encoder_decoder.py). donut-base
+# carries neither at the top level, so they must be set explicitly — from the
+# tokenizer when fine-tuning, or from the decoder sub-config for an untrained run.
+
+
+def set_donut_shift_tokens(model, processor) -> None:
+    """Training: decoder start = the task token, pad = the tokenizer's pad.
+
+    The processor's tokenizer is the authoritative vocab source, so the canonical
+    Donut convention (task token is the decoder start) is read straight from it.
+    """
+    set_shift_tokens(
+        model,
+        processor.tokenizer.pad_token_id,
+        processor.tokenizer.convert_tokens_to_ids(TASK_TOKEN),
+    )
+
+
+def init_shift_tokens_from_decoder(model) -> None:
+    """Untrained/bench: seed pad + decoder_start from the MBart decoder sub-config.
+
+    donut-base's decoder sub-config always carries pad_token_id and bos_token_id
+    (the top-level config does not). The exact ids are irrelevant to timing; we
+    only need valid ints so a forward / generate runs.
+    """
+    decoder = model.config.decoder
+    set_shift_tokens(model, decoder.pad_token_id, decoder.bos_token_id)
+
+
+# ── Config getters ────────────────────────────────────────────────────────────
+# The only places that read these HF-config attributes. Each is a plain read: the
+# value is guaranteed present by construction (encoder/decoder sub-config) or by a
+# prior set_shift_tokens call, so no defensive getattr is needed.
+
+
+def encoder_image_size(model) -> tuple[int, int]:
+    """(height, width) the encoder expects — always stored as a 2-list."""
+    height, width = model.encoder.config.image_size
+    return height, width
+
+
+def encoder_num_channels(model) -> int:
+    return model.encoder.config.num_channels
+
+
+def decoder_vocab_size(model) -> int:
+    return model.config.decoder.vocab_size
+
+
+def decoder_start_token_id(model) -> int:
+    return model.config.decoder_start_token_id
+
+
+def pad_token_id(model) -> int:
+    return model.config.pad_token_id
+
+
+def decoder_start_ids(model, batch_size: int = 1) -> torch.Tensor:
+    """A (batch_size, 1) tensor of decoder start tokens on the model's device."""
+    return torch.full(
+        (batch_size, 1),
+        decoder_start_token_id(model),
+        dtype=torch.long,
+        device=next(model.parameters()).device,
+    )
 
 
 def load_baseline_model(

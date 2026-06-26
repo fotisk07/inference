@@ -15,10 +15,10 @@ import typer
 from PIL import Image
 from tqdm import tqdm
 
-from donut.constants import DEFAULT_MAX_NEW_TOKENS, RESULTS_DIR, TASK_TOKEN
+from donut.constants import DEFAULT_MAX_NEW_TOKENS, RESULTS_DIR
 from donut.dataset import load_samples, parse_prediction
 from donut.metrics import summarize
-from donut.model import load_model
+from donut.model import decoder_start_ids, load_model
 from donut.runio import run_meta, save_record
 
 # Repo root (…/inference) so the default --data-json resolves no matter the CWD.
@@ -57,12 +57,10 @@ def run_predictions(
     """
     model.eval()
     model_dtype = next(model.parameters()).dtype
-    # Canonical Donut: the task token is the decoder start (build_model sets
+    # Canonical Donut: the task token is the decoder start (training set
     # decoder_start_token_id = <s_donut>), so seeding generation with it matches the
     # training-time decoder input position-for-position.
-    decoder_input_ids = processor.tokenizer(
-        TASK_TOKEN, add_special_tokens=False, return_tensors="pt"
-    ).input_ids.to(device)
+    decoder_input_ids = decoder_start_ids(model, batch_size=1)
 
     results = []
     iterator = tqdm(samples, desc="predicting") if progress else samples

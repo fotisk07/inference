@@ -12,8 +12,15 @@ import time
 import torch
 
 from donut.accel import apply_accel, check_accel, revert_accel
-from donut.model import autocast, set_encoder_image_size, set_shift_tokens
-from donut.synthetic import make_decoder_input_ids, make_pixel_values
+from donut.model import (
+    autocast,
+    decoder_start_ids,
+    decoder_vocab_size,
+    init_shift_tokens_from_decoder,
+    pad_token_id,
+    set_encoder_image_size,
+)
+from donut.synthetic import make_pixel_values
 
 
 def _cuda_sync():
@@ -99,14 +106,13 @@ def bench_infer_step(
         "max_new_tokens": max_new_tokens,
     }
     try:
+        init_shift_tokens_from_decoder(model)
         apply_accel(model, backend)
         check_accel(model, backend)
 
         pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
-        decoder_input_ids = make_decoder_input_ids(model, batch_size=batch_size)
-        pad_id = model.config.decoder.pad_token_id
-        if pad_id is None:
-            pad_id = model.config.decoder.eos_token_id
+        decoder_input_ids = decoder_start_ids(model, batch_size=batch_size)
+        pad_id = pad_token_id(model)
 
         # Untimed probe (bs=1) to read the live token counts from the model:
         # num_patches is the Swin input grid the encoder ingests; num_image_tokens
@@ -158,30 +164,6 @@ def bench_infer_step(
         revert_accel(model)
 
 
-def _ensure_shift_tokens(model) -> None:
-    """Set config.pad_token_id + decoder_start_token_id so a labels-forward runs.
-
-    A labels-forward shifts labels right using config.pad_token_id +
-    config.decoder_start_token_id (modeling_vision_encoder_decoder.py). load_model /
-    make_tiny_model don't guarantee both on model.config — and an old cached
-    config.json can omit one — so set them explicitly. getattr-with-default avoids
-    AttributeError on configs that omit the key entirely, then falls back to the
-    decoder sub-config / pad. Values are irrelevant to timing; we only need valid
-    ints so the forward runs.
-    """
-    pad = getattr(model.config, "pad_token_id", None)
-    if pad is None:
-        pad = getattr(model.decoder.config, "pad_token_id", None) or 1
-
-    start = getattr(model.config, "decoder_start_token_id", None)
-    if start is None:
-        start = getattr(model.decoder.config, "bos_token_id", None)
-    if start is None:
-        start = pad
-
-    set_shift_tokens(model, pad, start)
-
-
 def bench_train_step(
     model,
     *,
@@ -207,14 +189,14 @@ def bench_train_step(
         "max_length": max_length,
     }
     try:
-        _ensure_shift_tokens(model)
+        init_shift_tokens_from_decoder(model)
         apply_accel(model, backend)
         check_accel(model, backend)
 
         param_device = next(model.parameters()).device
         device = "cuda" if param_device.type == "cuda" else "cpu"
         pixel_values = make_pixel_values(model, batch_size=batch_size, seed=seed)
-        vocab = model.decoder.config.vocab_size
+        vocab = decoder_vocab_size(model)
         gen = torch.Generator(device=param_device).manual_seed(seed)
         labels = torch.randint(
             0, vocab, (batch_size, max_length), device=param_device, generator=gen

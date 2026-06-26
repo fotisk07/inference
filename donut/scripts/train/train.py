@@ -1,6 +1,6 @@
 """Donut fine-tuning — owns the whole training stack: the model build, the per-epoch
 loop, evaluation, checkpointing, and the CLI. The reusable model-config helpers it
-leans on (autocast, set_shift_tokens, fit_decoder_to_vocab, set_image_size)
+leans on (autocast, set_donut_shift_tokens, fit_decoder_to_vocab, set_image_size)
 live in donut.model / donut.dataset; everything training-specific lives here.
 """
 
@@ -18,13 +18,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import DonutProcessor, get_linear_schedule_with_warmup
 
-from donut import check_accel
+from donut import check_accel, decoder_attn_impl
 from donut.constants import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_MAX_LENGTH,
     MODEL_ID,
     RESULTS_DIR,
-    TASK_TOKEN,
 )
 from donut.dataset import (
     DonutDataset,
@@ -35,8 +34,8 @@ from donut.model import (
     autocast,
     fit_decoder_to_vocab,
     load_model,
+    set_donut_shift_tokens,
     set_image_size,
-    set_shift_tokens,
 )
 from donut.runio import run_meta, save_record
 
@@ -112,11 +111,7 @@ def build_model(model_name: str, device: str, backend: str, *, smoke: bool = Fal
     fit_decoder_to_vocab(model, processor)
     # Canonical Donut: the task token is the decoder start (auto-prepended to the
     # labels by shift_tokens_right); pad stays pad for loss masking / padding.
-    set_shift_tokens(
-        model,
-        processor.tokenizer.pad_token_id,
-        processor.tokenizer.convert_tokens_to_ids(TASK_TOKEN),
-    )
+    set_donut_shift_tokens(model, processor)
     return model, processor
 
 
@@ -243,7 +238,7 @@ def train(config: Config) -> None:
     print(
         f"  accel backend={config.backend}  "
         f"encoder_sdpa_patched={getattr(block, '_sdpa_patched', False)}  "
-        f"decoder_attn={model.decoder.config._attn_implementation}"
+        f"decoder_attn={decoder_attn_impl(model)}"
     )
 
     # --- data ---

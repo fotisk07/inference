@@ -7,12 +7,14 @@ the real Donut checkpoint and the tiny randomly-initialized fixture below.
 
 import torch
 
+from donut.model import encoder_image_size, encoder_num_channels
+
 # Same architecture family as the real checkpoint (DonutSwin + MBart) but ~69K
 # params: instant to build, runs on CPU, needs no downloads. Final encoder
 # hidden size (embed_dim * 2**(len(depths)-1) = 32) matches d_model, so no
 # enc-to-dec projection — same as the real model.
 TINY_ENCODER = dict(
-    image_size=64,
+    image_size=[64, 64],
     patch_size=4,
     num_channels=3,
     embed_dim=16,
@@ -60,24 +62,7 @@ def make_pixel_values(model, batch_size: int = 1, seed: int = 42) -> torch.Tenso
     """Random pixel_values on the model's device/dtype, sized from its config."""
     gen = torch.Generator()
     gen.manual_seed(seed)
-    img_size = model.encoder.config.image_size
-    h, w = (img_size, img_size) if isinstance(img_size, int) else img_size
-    channels = getattr(model.encoder.config, "num_channels", 3)
+    h, w = encoder_image_size(model)
+    channels = encoder_num_channels(model)
     pixel_values = torch.randn(batch_size, channels, h, w, generator=gen)
     return pixel_values.to(dtype=model.dtype, device=next(model.parameters()).device)
-
-
-def make_decoder_input_ids(
-    model, batch_size: int = 1, bos_id: int | None = None
-) -> torch.Tensor:
-    """A (batch_size, 1) tensor of decoder start tokens."""
-    if bos_id is None:
-        bos_id = model.config.decoder_start_token_id
-        if bos_id is None:
-            bos_id = model.config.decoder.bos_token_id
-    return torch.full(
-        (batch_size, 1),
-        bos_id,
-        dtype=torch.long,
-        device=next(model.parameters()).device,
-    )

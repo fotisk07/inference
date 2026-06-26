@@ -128,6 +128,11 @@ def _init_legacy_baseline(model):
     model.decoder.config._attn_implementation = "eager"
 
 
+def decoder_attn_impl(model) -> str:
+    """The decoder's active attn_implementation — the accel subsystem owns this flag."""
+    return model.decoder.config._attn_implementation
+
+
 __all__ = [
     "DECODER_FA",
     "DECODER_SDPA",
@@ -141,6 +146,7 @@ __all__ = [
     "Step",
     "apply_accel",
     "check_accel",
+    "decoder_attn_impl",
     "fa_available",
     "revert_accel",
     "sdpa_backend",

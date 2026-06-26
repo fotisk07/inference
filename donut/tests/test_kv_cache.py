@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from conftest import encode
-from donut.synthetic import make_decoder_input_ids
+from donut.model import decoder_start_ids
 
 N_STEPS = 10
 ATOL = RTOL = 1e-4
@@ -21,7 +21,7 @@ def _stepwise_cached_vs_full(model, enc, n_steps=N_STEPS):
     At every step the last-position logits of the cached path must match the
     logits of re-running the whole prefix without cache.
     """
-    tok = make_decoder_input_ids(model, batch_size=enc.shape[0])
+    tok = decoder_start_ids(model, batch_size=enc.shape[0])
     prefix = tok
     cache = None
     for _ in range(n_steps):

@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 import typer
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from donut.constants import DEFAULT_MAX_NEW_TOKENS, GLOBAL_OUT_DIR
@@ -35,10 +36,49 @@ class Config:
     output_json: str | None  # optional: per-document {image, gt, pred} debug dump
     backend: str
     max_new_tokens: int
+    batch_size: int
+    num_workers: int
     device: str
 
 
 # ── Inference loop ────────────────────────────────────────────────────────────
+
+
+class _PredictDataset(Dataset):
+    """Returns (pixel_values, sample) so the batched loop keeps the raw sample —
+    image path + gt fields — alongside the tensor. (DonutDataset drops both, only
+    emitting pixel_values + tokenized labels, which scoring/JSON can't use.)
+    """
+
+    def __init__(self, samples: list[dict], processor):
+        self.samples = samples
+        self.processor = processor
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict]:
+        sample = self.samples[idx]
+        image = Image.open(sample["image"]).convert("RGB")
+        pixel_values = self.processor(image, return_tensors="pt").pixel_values.squeeze(
+            0
+        )
+        return pixel_values, sample
+
+
+def _collate(batch: list[tuple]) -> tuple[torch.Tensor, list[dict]]:
+    """Stack the (fixed-size) pixel tensors; keep samples as a plain list."""
+    pixel_values, samples = zip(*batch)
+    return torch.stack(pixel_values), list(samples)
+
+
+def _gt_fields(sample: dict) -> dict[str, str]:
+    """Ground truth — may be absent (inference-only mode)."""
+    return {
+        f["field_name"].split("/")[-1]: f.get("annotator_text", "").strip()
+        for f in sample.get("fields", [])
+        if f.get("annotator_text", "").strip()
+    }
 
 
 def run_predictions(
@@ -48,27 +88,35 @@ def run_predictions(
     *,
     device: str,
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+    batch_size: int = 8,
+    num_workers: int = 4,
     progress: bool = True,
 ) -> list[dict]:
     """Generate field predictions for every sample.
 
     Returns [{"image", "gt": {field: value}, "pred": {field: value}}] — used both
-    for donut.metrics scoring and (verbatim) as the saved --output_json.
+    for donut.metrics scoring and (verbatim) as the saved --output_json. shuffle=False
+    keeps each row's gt/pred paired with its source sample.
     """
     model.eval()
     model_dtype = next(model.parameters()).dtype
-    # Canonical Donut: the task token is the decoder start (training set
-    # decoder_start_token_id = <s_donut>), so seeding generation with it matches the
-    # training-time decoder input position-for-position.
-    decoder_input_ids = decoder_start_ids(model, batch_size=1)
+
+    loader = DataLoader(
+        _PredictDataset(samples, processor),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=_collate,
+    )
 
     results = []
-    iterator = tqdm(samples, desc="predicting") if progress else samples
-    for sample in iterator:
-        image = Image.open(sample["image"]).convert("RGB")
-        pixel_values = processor(image, return_tensors="pt").pixel_values.to(
-            device=device, dtype=model_dtype
-        )
+    batches = tqdm(loader, desc="predicting") if progress else loader
+    for pixel_values, batch_samples in batches:
+        pixel_values = pixel_values.to(device=device, dtype=model_dtype)
+        # Canonical Donut: the task token is the decoder start (training set
+        # decoder_start_token_id = <s_donut>), so seeding generation with it matches
+        # the training-time decoder input position-for-position.
+        decoder_input_ids = decoder_start_ids(model, batch_size=pixel_values.size(0))
 
         with torch.no_grad():
             output_ids = model.generate(
@@ -77,19 +125,18 @@ def run_predictions(
                 max_new_tokens=max_new_tokens,
             )
 
-        decoded = processor.tokenizer.decode(output_ids[0], skip_special_tokens=False)
-        pred_fields = parse_prediction(decoded, processor)
-
-        # Ground truth — may be absent (inference-only mode)
-        gt_fields = {
-            f["field_name"].split("/")[-1]: f.get("annotator_text", "").strip()
-            for f in sample.get("fields", [])
-            if f.get("annotator_text", "").strip()
-        }
-
-        results.append(
-            {"image": str(sample["image"]), "gt": gt_fields, "pred": pred_fields}
-        )
+        # token2json ignores the pad/eos that batched generate right-pads with, so
+        # decoding the whole row (special tokens kept, to keep the <s_field> markers)
+        # is safe per-sample.
+        for ids, sample in zip(output_ids, batch_samples):
+            decoded = processor.tokenizer.decode(ids, skip_special_tokens=False)
+            results.append(
+                {
+                    "image": str(sample["image"]),
+                    "gt": _gt_fields(sample),
+                    "pred": parse_prediction(decoded, processor),
+                }
+            )
 
     return results
 
@@ -112,6 +159,8 @@ def predict(cfg: Config) -> None:
         samples,
         device=cfg.device,
         max_new_tokens=cfg.max_new_tokens,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
     )
 
     # Metrics — only when GT is present. summarize() prints a PrettyTable and
@@ -156,6 +205,8 @@ def main(
     ),
     backend: str = "sdpa",
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+    batch_size: int = 8,
+    num_workers: int = 4,
     device: str | None = None,
 ) -> None:
     """Score a fine-tuned Donut checkpoint on labelled data."""
@@ -167,6 +218,8 @@ def main(
             output_json=output_json,
             backend=backend,
             max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            num_workers=num_workers,
             device=device or ("cuda" if torch.cuda.is_available() else "cpu"),
         )
     )

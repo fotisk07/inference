@@ -23,6 +23,7 @@ from donut.constants import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_MAX_LENGTH,
     MODEL_ID,
+    RESULTS_DIR,
     TASK_TOKEN,
 )
 from donut.dataset import (
@@ -394,7 +395,9 @@ def train(config: Config) -> None:
     # --- per-epoch summary table + developed JSON (named like the bench records) ---
     _print_epoch_table(epoch_records)
     if not config.smoke:
-        out_dir = Path(config.output_dir)
+        # Weights live in config.output_dir (checkpoints/); the run record goes to
+        # the shared results root alongside the bench/predict records.
+        out_dir = RESULTS_DIR / "train"
         run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
         name = f"train__{run_name}__{datetime.now():%Y%m%d-%H%M%S}.json"
         save_record(

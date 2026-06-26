@@ -25,7 +25,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from donut.bench import bench_train_step
-from donut.constants import DEFAULT_MAX_LENGTH, MODEL_ID
+from donut.constants import (
+    DEFAULT_IMAGE_SIZE_STR,
+    DEFAULT_MAX_LENGTH,
+    MODEL_ID,
+    RESULTS_DIR,
+)
 from donut.dataset import DonutDataset, load_samples
 from donut.model import load_baseline_model, load_model
 from donut.runio import parse_image_sizes, parse_ints, run_meta, save_record
@@ -80,17 +85,23 @@ def main(
     # inference bench's --dtype sweep). "bf16" = autocast on CUDA; "fp32" = off.
     precision: str = "bf16",
     seed: int = 42,
-    out: Path = Path("results/bench_train"),
+    out: Path = typer.Option(
+        RESULTS_DIR / "bench_train",
+        help="directory where per-combo result JSON records are written",
+    ),
     tiny: bool = False,
     backends: str = "baseline,eager,sdpa,fa",
-    image_sizes: str = "1280x960",
+    image_sizes: str = DEFAULT_IMAGE_SIZE_STR,
     batch_sizes: str = "1",
     max_length: int = DEFAULT_MAX_LENGTH,
     n_runs: int = 10,
     n_warmup: int = 3,
     force: bool = False,
-    # Training-specific: if given, also probe real dataloader throughput.
-    data_json: str | None = None,
+    # Training-specific: optional dataloader-probe INPUT (not an output).
+    probe_data_json: str | None = typer.Option(
+        None,
+        help="optional: real-data JSON to probe dataloader throughput (input, not output)",
+    ),
     num_workers: int = 4,
 ) -> None:
     """Per-backend training-step timing breakdown (compute-only, dataloader removed)."""
@@ -104,10 +115,6 @@ def main(
     model, model_id = load_baseline_model(model_id, device, torch.float32, tiny=tiny)
     meta = run_meta(device, "f32", model_id)
     meta["precision"] = precision
-
-    print(
-        f"\nTraining-step bench  device={device}  precision={precision}  ml={max_length}\n"
-    )
 
     combos = list(itertools.product(backends_list, image_sizes_list, batch_sizes_list))
     records = []
@@ -176,13 +183,13 @@ def main(
             table.add_row([*row_key, "ERROR", *["-"] * 8])
     print(table)
 
-    if data_json:
+    if probe_data_json:
         _, processor = load_model(
             model_id=model_id, device=device, dtype=torch.float32, backend="baseline"
         )
         probe = _dataloader_probe(
             processor,
-            data_json,
+            probe_data_json,
             batch_sizes_list[0],
             num_workers,
             n_runs,

@@ -25,7 +25,7 @@ from donut.model import load_baseline_model
 from donut.runio import resolve_device_dtype, run_meta, save_record
 from donut.synthetic import make_pixel_values
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 
 
 def _encode_and_generate(model, pixel_values, max_new_tokens: int):

@@ -8,7 +8,7 @@ from prettytable import PrettyTable
 from tqdm import tqdm
 
 from donut.bench import bench_infer_step
-from donut.constants import MODEL_ID
+from donut.constants import DEFAULT_IMAGE_SIZE_STR, MODEL_ID, RESULTS_DIR
 from donut.model import load_baseline_model
 from donut.runio import (
     parse_image_sizes,
@@ -25,7 +25,7 @@ def _filename(
     return f"{backend}__{h}x{w}__bs{batch_size}__mnt{max_new_tokens}.json"
 
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 
 
 @app.command()
@@ -34,10 +34,13 @@ def main(
     device: str | None = None,
     dtype: Literal["bf16", "f16", "f32"] = "bf16",
     seed: int = 42,
-    out: Path = Path("results/bench_speed"),
+    out: Path = typer.Option(
+        RESULTS_DIR / "bench_speed",
+        help="directory where per-combo result JSON records are written",
+    ),
     tiny: bool = False,
     backends: str = "baseline,eager,sdpa,sdpa_flash,sdpa_math,sdpa_efficient,sdpa_cudnn,fa",
-    image_sizes: str = "1280x960",
+    image_sizes: str = DEFAULT_IMAGE_SIZE_STR,
     batch_sizes: str = "1",
     max_new_tokens: str = "32",
     n_runs: int = 10,

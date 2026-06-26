@@ -15,7 +15,7 @@ import typer
 from PIL import Image
 from tqdm import tqdm
 
-from donut.constants import DEFAULT_MAX_NEW_TOKENS, TASK_TOKEN
+from donut.constants import DEFAULT_MAX_NEW_TOKENS, RESULTS_DIR, TASK_TOKEN
 from donut.dataset import load_samples, parse_prediction
 from donut.metrics import summarize
 from donut.model import load_model
@@ -31,7 +31,7 @@ class Config:
 
     checkpoint: str  # checkpoint dir saved by train.py (e.g. checkpoints/best)
     data_json: str
-    out_dir: str  # directory for the metrics record JSON (named like bench records)
+    out: Path  # directory for the metrics record JSON (named like bench records)
     output_json: str | None  # optional: per-document {image, gt, pred} debug dump
     backend: str
     max_new_tokens: int
@@ -131,10 +131,9 @@ def predict(cfg: Config) -> None:
                 "soft": summarize(results, soft=True),
             },
         }
-        out_dir = Path(cfg.out_dir)
         name = f"predict__{Path(cfg.checkpoint).name}__{Path(cfg.data_json).stem}__{datetime.now():%Y%m%d-%H%M%S}.json"
-        save_record(out_dir, name, record)
-        print(f"Saved metrics → {out_dir / name}")
+        save_record(cfg.out, name, record)
+        print(f"Saved metrics → {cfg.out / name}")
 
     # Optional debug dump — per-document {image, gt, pred} records
     if cfg.output_json:
@@ -152,10 +151,14 @@ def main(
     # Checkpoint dir saved by train.py (e.g. checkpoints/best or checkpoints/last).
     checkpoint: str,
     data_json: str = str(_REPO_ROOT / "test_data" / "train.json"),
-    # Directory for the metrics record JSON (one self-describing file per run).
-    out_dir: str = "results/predict",
-    # If given, also write per-document {image, gt, pred} records to this JSON path.
-    output_json: str | None = None,
+    out: Path = typer.Option(
+        RESULTS_DIR / "predict",
+        help="directory where per-run result JSON records are written",
+    ),
+    output_json: str | None = typer.Option(
+        None,
+        help="optional: also write per-document {image, gt, pred} predictions here (debug)",
+    ),
     backend: str = "sdpa",
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     device: str | None = None,
@@ -165,7 +168,7 @@ def main(
         Config(
             checkpoint=checkpoint,
             data_json=data_json,
-            out_dir=out_dir,
+            out=out,
             output_json=output_json,
             backend=backend,
             max_new_tokens=max_new_tokens,

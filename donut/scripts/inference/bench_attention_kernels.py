@@ -27,7 +27,7 @@ from donut.runio import parse_ints, save_record
 DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 SDPA_BACKENDS = ["math", "efficient", "flash", "cudnn"]
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 
 
 def _make_qkv(batch_size, num_heads, q_len, kv_len, head_dim, dtype, device, seed):

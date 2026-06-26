@@ -1,9 +1,18 @@
+from pathlib import Path
+
 MODEL_ID = "naver-clova-ix/donut-base"
+
+# Root every script prepends when saving result records (CWD-relative); the single
+# source for "where outputs go". Per-script subdirs live under it, e.g. results/predict.
+RESULTS_DIR = Path("results")
 
 # ── Canonical defaults ────────────────────────────────────────────────────────
 # The single source of truth for the fine-tuning resolution and decode length.
 # Sweep scripts (bench_speed) override these with their own experiment ranges.
 DEFAULT_IMAGE_SIZE = (1280, 960)  # (height, width) the encoder/processor run at
+DEFAULT_IMAGE_SIZE_STR = (
+    f"{DEFAULT_IMAGE_SIZE[0]}x{DEFAULT_IMAGE_SIZE[1]}"  # "HxW" CLI form
+)
 DEFAULT_MAX_NEW_TOKENS = 128  # inference generation budget (predict.py)
 DEFAULT_MAX_LENGTH = 128  # training decoder sequence length (dataset/train)
 

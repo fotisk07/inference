@@ -15,13 +15,11 @@ Component ms/step: encoder_fwd, decoder_fwd, backward, optim_step.
 
 import itertools
 import json
-import time
 from pathlib import Path
 
 import torch
 import typer
 from prettytable import PrettyTable
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from donut.bench import bench_train_step
@@ -31,8 +29,7 @@ from donut.constants import (
     MODEL_ID,
     GLOBAL_OUT_DIR,
 )
-from donut.dataset import DonutDataset, load_samples
-from donut.model import load_baseline_model, load_model
+from donut.model import load_baseline_model
 from donut.runio import parse_image_sizes, parse_ints, run_meta, save_record
 
 
@@ -41,40 +38,6 @@ def _filename(backend: str, h: int, w: int, batch_size: int, max_length: int) ->
 
 
 app = typer.Typer(add_completion=False)
-
-
-def _dataloader_probe(
-    processor,
-    data_json: str,
-    batch_size: int,
-    num_workers: int,
-    n_batches: int,
-) -> dict:
-    """Real-data loading throughput — the practical bottleneck the compute bench hides.
-
-    Compare its docs/s to the compute docs/s above: if loading is much slower, real
-    training is data-bound and the backend choice can't move the wall clock.
-    """
-    samples = load_samples(Path(data_json))
-    ds = DonutDataset(samples, processor, max_length=DEFAULT_MAX_LENGTH)
-    loader = DataLoader(
-        ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
-    )
-
-    times_ms = []
-    end = time.perf_counter()
-    for i, _ in enumerate(loader):
-        times_ms.append((time.perf_counter() - end) * 1000)
-        end = time.perf_counter()
-        if i + 1 >= n_batches:
-            break
-    mean_ms = sum(times_ms) / len(times_ms)
-    return {
-        "mean_batch_ms": round(mean_ms, 3),
-        "loader_docs_s": round(batch_size / (mean_ms / 1000), 2),
-        "n_batches": len(times_ms),
-        "num_workers": num_workers,
-    }
 
 
 @app.command()
@@ -94,12 +57,6 @@ def main(
     n_runs: int = 10,
     n_warmup: int = 3,
     force: bool = False,
-    # Training-specific: optional dataloader-probe INPUT (not an output).
-    probe_data_json: str | None = typer.Option(
-        None,
-        help="optional: real-data JSON to probe dataloader throughput (input, not output)",
-    ),
-    num_workers: int = 4,
 ) -> None:
     """Per-backend training-step timing breakdown (compute-only, dataloader removed)."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -179,24 +136,6 @@ def main(
         else:
             table.add_row([*row_key, "ERROR", *["-"] * 8])
     print(table)
-
-    if probe_data_json:
-        _, processor = load_model(
-            model_id=model_id, device=device, dtype=torch.float32, backend="baseline"
-        )
-        probe = _dataloader_probe(
-            processor,
-            probe_data_json,
-            batch_sizes_list[0],
-            num_workers,
-            n_runs,
-        )
-        probe_table = PrettyTable()
-        probe_table.field_names = ["num_workers", "mean_batch_ms", "loader_doc_s"]
-        probe_table.add_row(
-            [probe["num_workers"], probe["mean_batch_ms"], probe["loader_docs_s"]]
-        )
-        print(probe_table)
 
 
 if __name__ == "__main__":

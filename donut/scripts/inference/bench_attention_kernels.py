@@ -11,6 +11,8 @@ against a growing KV cache -- the worst case for flash attention's tiling).
 attention is designed for).
 """
 
+import resource
+
 import itertools
 from pathlib import Path
 from typing import Literal
@@ -22,9 +24,8 @@ from prettytable import PrettyTable
 
 from donut.accel import sdpa_backend
 from donut.bench import time_fn
-from donut.runio import parse_ints, save_record
+from donut.runio import parse_ints, save_record, resolve_device_dtype
 
-DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 SDPA_BACKENDS = ["math", "efficient", "flash", "cudnn"]
 
 app = typer.Typer(add_completion=False)
@@ -79,8 +80,7 @@ def main(
     seed: int = 42,
     out: Path | None = None,
 ) -> None:
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    torch_dtype = DTYPES[dtype]
+    device, torch_dtype = resolve_device_dtype(device, dtype)
     kv_len_list = parse_ints(kv_lens)
     batch_size_list = parse_ints(batch_sizes)
     mode_list = [m.strip() for m in modes.split(",") if m.strip()]

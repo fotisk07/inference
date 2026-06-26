@@ -15,7 +15,7 @@ import typer
 from PIL import Image
 from tqdm import tqdm
 
-from donut.constants import DEFAULT_MAX_NEW_TOKENS, RESULTS_DIR
+from donut.constants import DEFAULT_MAX_NEW_TOKENS, GLOBAL_OUT_DIR
 from donut.dataset import load_samples, parse_prediction
 from donut.metrics import summarize
 from donut.model import decoder_start_ids, load_model
@@ -149,10 +149,7 @@ def main(
     # Checkpoint dir saved by train.py (e.g. checkpoints/best or checkpoints/last).
     checkpoint: str,
     data_json: str = str(_REPO_ROOT / "test_data" / "train.json"),
-    out: Path = typer.Option(
-        RESULTS_DIR / "predict",
-        help="directory where per-run result JSON records are written",
-    ),
+    out: Path = GLOBAL_OUT_DIR / "results" / "predict",
     output_json: str | None = typer.Option(
         None,
         help="optional: also write per-document {image, gt, pred} predictions here (debug)",

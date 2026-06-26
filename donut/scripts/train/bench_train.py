@@ -29,7 +29,7 @@ from donut.constants import (
     DEFAULT_IMAGE_SIZE_STR,
     DEFAULT_MAX_LENGTH,
     MODEL_ID,
-    RESULTS_DIR,
+    GLOBAL_OUT_DIR,
 )
 from donut.dataset import DonutDataset, load_samples
 from donut.model import load_baseline_model, load_model
@@ -85,10 +85,7 @@ def main(
     # inference bench's --dtype sweep). "bf16" = autocast on CUDA; "fp32" = off.
     precision: str = "bf16",
     seed: int = 42,
-    out: Path = typer.Option(
-        RESULTS_DIR / "bench_train",
-        help="directory where per-combo result JSON records are written",
-    ),
+    out: Path = GLOBAL_OUT_DIR / "results" / "bench_train",
     tiny: bool = False,
     backends: str = "baseline,eager,sdpa,fa",
     image_sizes: str = DEFAULT_IMAGE_SIZE_STR,

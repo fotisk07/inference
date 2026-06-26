@@ -20,7 +20,7 @@ from prettytable import PrettyTable
 
 from donut.accel import PRESETS, apply_accel, revert_accel
 from donut.audit import diff_stats
-from donut.constants import MODEL_ID
+from donut.constants import MODEL_ID, GLOBAL_OUT_DIR
 from donut.model import load_baseline_model
 from donut.runio import resolve_device_dtype, run_meta, save_record
 from donut.synthetic import make_pixel_values
@@ -85,7 +85,7 @@ def main(
     device: str | None = None,
     dtype: Literal["bf16", "f16", "f32"] = "bf16",
     seed: int = 42,
-    out: Path = Path("results/audit_accel"),
+    out: Path = GLOBAL_OUT_DIR / "results" / "audit_accel",
     tiny: bool = False,
     batch_size: int = 1,
     max_new_tokens: int = 32,

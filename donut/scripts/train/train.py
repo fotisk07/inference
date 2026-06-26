@@ -23,7 +23,7 @@ from donut.constants import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_MAX_LENGTH,
     MODEL_ID,
-    RESULTS_DIR,
+    GLOBAL_OUT_DIR,
 )
 from donut.dataset import (
     DonutDataset,
@@ -63,7 +63,7 @@ class Config:
     lr: float
     warmup_steps: int
     max_epochs: int
-    output_dir: str
+    output_dir: Path
     mlflow_experiment: str | None
     run_name: str | None
     backend: str
@@ -210,10 +210,13 @@ def train(config: Config) -> None:
     )
     print(f"{'=' * 60}\n")
 
+    # Resolved run identity: names the metrics record AND the checkpoint subfolder
+    # so weights and metrics for a run share one label.
+    run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
+
     # --- mlflow ---
     if config.mlflow_experiment:
         mlflow.set_experiment(config.mlflow_experiment)
-        run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
         mlflow.start_run(run_name=run_name)
         mlflow.log_params(asdict(config))
 
@@ -377,13 +380,13 @@ def train(config: Config) -> None:
         # --- checkpoint: keep the best-by-val-loss ---
         if not config.smoke and val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_dir = Path(config.output_dir) / "best"
+            best_dir = Path(config.output_dir) / run_name / "best"
             save_checkpoint(model, processor, best_dir)
             print(f"           saved best (val={val_loss:.4f}) → {best_dir}")
 
     # --- checkpoint: final weights ---
     if not config.smoke:
-        last_dir = Path(config.output_dir) / "last"
+        last_dir = Path(config.output_dir) / run_name / "last"
         save_checkpoint(model, processor, last_dir)
         print(f"Saved last → {last_dir}")
 
@@ -392,8 +395,7 @@ def train(config: Config) -> None:
     if not config.smoke:
         # Weights live in config.output_dir (checkpoints/); the run record goes to
         # the shared results root alongside the bench/predict records.
-        out_dir = RESULTS_DIR / "train"
-        run_name = config.run_name or f"lr{config.lr}-bs{config.batch_size}"
+        out_dir = GLOBAL_OUT_DIR / "results" / "train"
         name = f"train__{run_name}__{datetime.now():%Y%m%d-%H%M%S}.json"
         save_record(
             out_dir,
@@ -433,8 +435,8 @@ def main(
     lr: float = 3e-4,
     warmup_steps: int = 100,
     max_epochs: int = 30,
-    # Parent of the best/ (lowest val loss) and last/ save_pretrained dirs.
-    output_dir: str = "checkpoints",
+    # Root of the per-run checkpoint dirs: <output_dir>/<run_name>/{best,last}.
+    output_dir: Path = GLOBAL_OUT_DIR / "checkpoints",
     # Set an experiment name to enable MLflow logging; run_name defaults to lr+bs.
     mlflow_experiment: str | None = None,
     run_name: str | None = None,

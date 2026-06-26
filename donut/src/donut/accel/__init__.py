@@ -14,6 +14,11 @@ with the three functions and add its step to PRESETS.
 
 from collections.abc import Callable
 
+from donut.accel.decoder_eager import (
+    apply_decoder_eager,
+    check_decoder_eager,
+    revert_decoder_eager,
+)
 from donut.accel.decoder_fa import (
     apply_decoder_fa,
     check_decoder_fa,
@@ -49,6 +54,7 @@ Step = tuple[Callable, Callable, Callable]  # (apply, revert, check)
 
 MASK_CACHE: Step = (apply_mask_cache, revert_mask_cache, check_mask_cache)
 ENCODER_SDPA: Step = (apply_encoder_sdpa, revert_encoder_sdpa, check_encoder_sdpa)
+DECODER_EAGER: Step = (apply_decoder_eager, revert_decoder_eager, check_decoder_eager)
 DECODER_SDPA: Step = (apply_decoder_sdpa, revert_decoder_sdpa, check_decoder_sdpa)
 DECODER_SDPA_CUDNN: Step = (
     apply_decoder_sdpa_cudnn,
@@ -72,14 +78,16 @@ DECODER_SDPA_EFFICIENT: Step = (
 )
 DECODER_FA: Step = (apply_decoder_fa, revert_decoder_fa, check_decoder_fa)
 
-# Mask caching is always first (universally beneficial; the SDPA encoder patch
-# consumes its cached bias). Note "sdpa" and all "sdpa_*" presets use the SAME
-# ENCODER_SDPA step — DonutSwin has no flash path — so they differ ONLY in the
-# decoder kernel: a clean decoder-only comparison (vs "fa"/"eager", which move
-# both the encoder and decoder kernel).
+# "baseline"/"eager" pin the decoder to eager explicitly: transformers v5 defaults
+# a fresh decoder to SDPA, so without DECODER_EAGER these presets would silently
+# run SDPA (and check_accel would not catch it). The encoder needs no eager step —
+# DonutSwin's attention is eager unless ENCODER_SDPA monkey-patches it.
+# Mask caching follows (universally beneficial; the SDPA encoder patch consumes its
+# cached bias). "sdpa" and all "sdpa_*" presets share the SAME ENCODER_SDPA step —
+# DonutSwin has no flash path — so they differ ONLY in the decoder kernel.
 PRESETS: dict[str, list[Step]] = {
-    "baseline": [],
-    "eager": [MASK_CACHE],
+    "baseline": [DECODER_EAGER],
+    "eager": [DECODER_EAGER, MASK_CACHE],
     "sdpa": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA],
     "sdpa_cudnn": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_CUDNN],
     "sdpa_flash": [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA_FLASH],

@@ -133,7 +133,7 @@ A separate question from inference. Two measurements, see
 # Mechanism: per-backend training-step breakdown, dataloader stripped.
 uv run python scripts/train/bench_train.py --backends baseline,eager,sdpa,fa
 #   --image-sizes 1280x960,1920x1440 --batch-sizes 1,4   sweep size/batch (like bench_speed)
-#   add --data-json /path  to also probe real dataloader throughput
+#   add --probe-data-json /path  to also probe real dataloader throughput
 #   add --tiny             to run the harness on CPU with no downloads
 
 # End-to-end: train.py prints e2e / compute / data-bound % docs/s per epoch.

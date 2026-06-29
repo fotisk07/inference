@@ -138,13 +138,17 @@ uv run python scripts/train/bench_train.py --backends baseline,eager,sdpa,fa
 # Dataloader: standalone real-data loading throughput (the bottleneck bench_train strips).
 uv run python scripts/train/bench_loader.py /path/to/data.json --num-workers 0,4,8
 
-# End-to-end: train.py prints e2e / compute docs/s + data % / overhead % per epoch.
+# End-to-end: train.py prints e2e / compute docs/s + compute % / overhead % per epoch.
+
+# Sweep drivers (plain bash, edit DATA_JSON / grid inside):
+./scripts/train/sweep_loader.sh                 # workers × size × batch
+DATA_JSON=/path/train.json ./scripts/train/sweep_train.sh   # backend × size × batch
 ```
 
 The atomic timer is `donut.bench.bench_train_step` (twin of the inference
-`bench_infer_step`, same docs/s metric);
-if compute got faster but `data %` is high, the dataloader — not the kernel —
-is the wall-clock lever (a high `overhead %` instead points at per-step Python cost).
+`bench_infer_step`, same docs/s metric); if compute got faster but `overhead %` is high,
+something non-GPU is the wall-clock lever — use `bench_loader.py` to check if it's the
+dataloader.
 
 ## Metrics
 
@@ -228,36 +232,42 @@ directly times `encoder_fwd` and the full `generate()` (`total`), then derives
 `decode = total − encoder_fwd`, so its `encoder_fwd_ms` / `decode_ms` / `total_ms` and the
 `compute_docs_s` / `encoder_docs_s` columns line up one-for-one with the training table.
 
-### Wall-clock split: data % / compute % / overhead %
+### Wall-clock split: compute % / overhead %
 
-The epoch wall (`wall_s`, the **e2e** window) splits **three** ways — all measured in the
-`train.py` loop, all over `wall_s`, summing to 100 %:
+The epoch wall (`wall_s`, the **e2e** window) splits **two** ways — both measured in the
+`train.py` loop, over `wall_s`, summing to 100 %:
 
 ```
-data %     = data_fetch                  / wall × 100
-compute %  = compute                     / wall × 100
-overhead % = (wall − data_fetch − compute) / wall × 100
+compute %  = compute            / wall × 100
+overhead % = (wall − compute)   / wall × 100
 ```
 
-- `data_fetch` — wall waiting on the next batch from the DataLoader.
-- `compute` — the synced `fwd+bwd+clip+opt` region (the op set the bench measures).
-- **overhead** — everything else the wall contains: the **H2D copy** (`.to(device)`),
-  `scheduler.step()`, per-step `loss.item()`, the tqdm postfix, mlflow logging, the sync.
-  (H2D and scheduler are deliberately *outside* compute so `compute docs/s` is
-  apples-to-apples with the bench, where tensors are already resident and there is no
-  scheduler.)
+- `compute` — the synced `fwd+bwd+clip+opt` region (the exact op set the bench measures).
+- **overhead** — everything else the wall contains: loader stall, the **H2D copy**
+  (`.to(device)`), `scheduler.step()`, per-step `loss.item()`, the tqdm postfix, mlflow
+  logging, the sync. (H2D and scheduler sit *outside* compute so `compute docs/s` is
+  apples-to-apples with the bench, where tensors are already resident.)
 
 Because `compute` is a **sub-interval** of the wall, `compute_docs_s ≥ e2e_docs_s`
 **always**, tied by the exact identity `compute % = e2e_docs_s / compute_docs_s × 100`.
-So the e2e↔compute gap is exactly `data % + overhead %` — not the dataloader alone:
+So the e2e↔compute gap is exactly `overhead %`:
 
-- high **data %** → dataloader-bound: e2e docs/s stays flat across backends even when
-  compute docs/s improves (a kernel can't fix it).
-- high **overhead %** → per-step Python/logging/sync/H2D cost dominates the wall.
-- both low → e2e ≈ compute: the GPU step is the wall, and accel backends move it.
+- high **overhead %** → the wall is not the GPU step (loader stall and/or per-step
+  Python/logging/H2D). e2e docs/s stays flat across backends even when compute docs/s
+  improves — a kernel can't fix it.
+- low **overhead %** → e2e ≈ compute: the GPU step is the wall, and accel backends move it.
+
+**Why no `data %`?** The loop *used* to split out a data-fetch bucket, but with
+`num_workers > 0` the DataLoader prefetches in background workers, so that bucket measures
+only the *exposed* stall — and it is fungible with overhead. Concretely: turning on mlflow
+adds ~9 s of main-thread logging (overhead↑), the workers prefetch during it, and the
+exposed data stall *shrinks* (~10 s → ~1 s) for the same wall. A per-epoch `data %` is
+therefore misleading. For the loader's real cost, measure it in isolation with
+`bench_loader.py`.
 
 `bench_loader.py` measures a standalone **loader docs/s** (real images through
-`DonutDataset`); comparing it to compute docs/s shows the data side from the bench.
+`DonutDataset`, with a DataLoader built to match train's — pin_memory + seeded workers);
+comparing it to compute docs/s tells you whether the loader can keep the GPU fed.
 
 ### How it's measured
 
@@ -280,6 +290,7 @@ The accel "speeds up training" iff a backend lowers the **total** step time (rai
 **compute docs/s**) versus `baseline`. To locate *where* a change comes from, compare
 **encoder docs/s** (the Swin patch is the only encoder difference; the decoder is the
 same SDPA path in every backend including baseline). Whether that compute win shows up in
-real training is answered by **e2e docs/s** and the **data % / overhead %** split: a high
-data % means the win is hidden behind the dataloader; a high overhead % means it's hidden
-behind per-step Python/logging/H2D cost.
+real training is answered by **e2e docs/s** vs **compute docs/s**: a high **overhead %**
+means the win is hidden behind non-GPU cost (loader stall and/or per-step
+Python/logging/H2D). To tell whether it's specifically the loader, compare **loader
+docs/s** from `bench_loader.py` against compute docs/s.

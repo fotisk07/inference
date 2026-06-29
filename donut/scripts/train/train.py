@@ -166,47 +166,38 @@ def _round(x: float | None, n: int) -> float | None:
     return round(x, n) if x is not None else None
 
 
-@dataclass
-class EpochStats:
-    """Accumulators for one epoch + the single home for the per-epoch metric math.
-
-    The wall clock splits three ways (all over `wall`, summing to 100%):
-      data%     — waiting on the DataLoader (`data_fetch`)
-      compute%  — synced fwd+bwd+clip+opt (`compute`); same op set as bench_train_step
+def epoch_record(
+    epoch: int,
+    *,
+    wall: float,
+    compute: float,
+    docs: int,
+    steps: int,
+    loss_sum: float,
+    val_loss: float | None,
+    val_docs_s: float | None,
+) -> dict:
+    """Per-epoch metrics. The wall splits TWO ways (summing to 100%):
+      compute% — synced fwd+bwd+clip+opt (same op set as bench_train_step)
       overhead% — everything else: H2D + scheduler.step + .item()/postfix/mlflow/sync
-    `compute% == e2e_docs_s / compute_docs_s`, so the e2e↔compute gap is exactly
-    `data% + overhead%` — not the dataloader alone.
+    `compute% == e2e_docs_s / compute_docs_s`. data% is intentionally NOT split out —
+    under prefetch it is fungible with overhead; measure the loader with bench_loader.py.
     """
-
-    data_fetch: float = 0.0  # wall waiting on the loader
-    compute: float = 0.0  # synced fwd+bwd+clip+opt (no H2D, no scheduler)
-    wall: float = 0.0  # full epoch wall clock
-    docs: int = 0
-    steps: int = 0
-    loss_sum: float = 0.0  # python-side (per-step .item() kept)
-
-    def record(
-        self, epoch: int, val_loss: float | None, val_docs_s: float | None
-    ) -> dict:
-        overhead = self.wall - self.data_fetch - self.compute
-        pct = (lambda t: 100 * t / self.wall) if self.wall > 0 else (lambda t: 0.0)
-        return {
-            "epoch": epoch,
-            "train_loss": round(self.loss_sum / self.steps, 4) if self.steps else 0.0,
-            "val_loss": _round(val_loss, 4),
-            "e2e_docs_s": _round(docs_per_s(self.docs, self.wall), 2),
-            "compute_docs_s": _round(docs_per_s(self.docs, self.compute), 2),
-            "val_docs_s": _round(val_docs_s, 2),
-            # epoch wall split, in seconds (wall = compute + data + overhead)
-            "wall_s": round(self.wall, 3),
-            "compute_s": round(self.compute, 3),
-            "data_s": round(self.data_fetch, 3),
-            "overhead_s": round(overhead, 3),
-            # same split as % of the wall (e2e = 100 = compute% + data% + overhead%)
-            "compute_pct": round(pct(self.compute), 1),
-            "data_pct": round(pct(self.data_fetch), 1),
-            "overhead_pct": round(pct(overhead), 1),
-        }
+    overhead = wall - compute
+    pct = (lambda t: round(100 * t / wall, 1)) if wall > 0 else (lambda t: 0.0)
+    return {
+        "epoch": epoch,
+        "train_loss": round(loss_sum / steps, 4) if steps else 0.0,
+        "val_loss": _round(val_loss, 4),
+        "e2e_docs_s": _round(docs_per_s(docs, wall), 2),
+        "compute_docs_s": _round(docs_per_s(docs, compute), 2),
+        "val_docs_s": _round(val_docs_s, 2),
+        "wall_s": round(wall, 3),
+        "compute_s": round(compute, 3),
+        "overhead_s": round(overhead, 3),
+        "compute_pct": pct(compute),
+        "overhead_pct": pct(overhead),
+    }
 
 
 def _print_epoch_table(records: list[dict]) -> None:
@@ -220,7 +211,6 @@ def _print_epoch_table(records: list[dict]) -> None:
         "compute d/s",
         "val d/s",
         "compute %",
-        "data %",
         "overhead %",
     ]
 
@@ -237,7 +227,6 @@ def _print_epoch_table(records: list[dict]) -> None:
                 f(r["compute_docs_s"], ".1f"),
                 f(r["val_docs_s"], ".1f"),
                 f(r["compute_pct"], ".0f"),
-                f(r["data_pct"], ".0f"),
                 f(r["overhead_pct"], ".0f"),
             ]
         )
@@ -357,22 +346,21 @@ def train(config: Config) -> None:
 
     for epoch in range(config.max_epochs):
         # --- train one epoch ---
-        # Per-step wall-time splits into data_fetch (waiting on the loader) and
-        # compute (fwd + bwd + clip + opt, synced — H2D and scheduler.step fall into
-        # overhead); the whole epoch is the e2e window. See README.md (Metrics).
+        # The epoch wall splits two ways: compute (synced fwd+bwd+clip+opt) and overhead
+        # (everything else — H2D, scheduler.step, .item()/postfix/mlflow/sync). The whole
+        # epoch is the e2e window. See README.md (Metrics) for why data% is not split out.
         model.train()
-        stats = EpochStats()
+        compute = 0.0
+        docs = steps = 0
+        loss_sum = 0.0
         wall_start = time.perf_counter()
-        end = time.perf_counter()
 
         bar = tqdm(
             train_loader, desc=f"epoch {epoch + 1}/{config.max_epochs}", leave=False
         )
         for batch in bar:
-            stats.data_fetch += time.perf_counter() - end
-
-            # H2D is data movement, not compute → outside the window (lands in overhead),
-            # so compute_docs_s matches bench_train_step (tensors already on device there).
+            # H2D stays outside the compute window (→ overhead) so compute_docs_s matches
+            # bench_train_step, where tensors are already on the device.
             pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
 
@@ -384,26 +372,34 @@ def train(config: Config) -> None:
             optimizer.step()
             optimizer.zero_grad()
             _sync(config.device)
-            stats.compute += time.perf_counter() - c0
+            compute += time.perf_counter() - c0
 
-            scheduler.step()  # CPU LR math → outside the compute window (negligible)
-            stats.loss_sum += loss.item()
-            stats.docs += pixel_values.shape[0]
-            stats.steps += 1
+            scheduler.step()
+            loss_sum += loss.item()
+            docs += pixel_values.shape[0]
+            steps += 1
             global_step += 1
             bar.set_postfix(loss=f"{loss.item():.4f}")
             if log_mlflow:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
-            end = time.perf_counter()
 
-        stats.wall = time.perf_counter() - wall_start
+        wall = time.perf_counter() - wall_start
 
         # --- validation ---
         val_loss, val_docs_s = evaluate(
             model, val_loader, config.device, config.precision
         )
 
-        rec = stats.record(epoch + 1, val_loss, val_docs_s)
+        rec = epoch_record(
+            epoch + 1,
+            wall=wall,
+            compute=compute,
+            docs=docs,
+            steps=steps,
+            loss_sum=loss_sum,
+            val_loss=val_loss,
+            val_docs_s=val_docs_s,
+        )
         epoch_records.append(rec)
 
         val_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
@@ -412,12 +408,11 @@ def train(config: Config) -> None:
         compute_ds = rec["compute_docs_s"] or 0.0
         print(
             f"Epoch {epoch + 1:3d}/{config.max_epochs}  "
-            f"train={rec['train_loss']:.4f}  val={val_str}\n"
-            f"  throughput : e2e {e2e:.1f}  compute {compute_ds:.1f}  val {val_speed}  doc/s\n"
-            f"  epoch time : {rec['wall_s']:.1f}s = compute {rec['compute_s']:.1f}"
-            f" + data {rec['data_s']:.1f} + overhead {rec['overhead_s']:.1f}\n"
-            f"  budget %   : e2e 100 = compute {rec['compute_pct']:.0f}"
-            f" + data {rec['data_pct']:.0f} + overhead {rec['overhead_pct']:.0f}"
+            f"train={rec['train_loss']:.4f}  val={val_str}  | "
+            f"e2e {e2e:.1f}  compute {compute_ds:.1f}  val {val_speed} doc/s  | "
+            f"wall {rec['wall_s']:.1f}s = compute {rec['compute_s']:.1f}"
+            f" + overhead {rec['overhead_s']:.1f}"
+            f" ({rec['compute_pct']:.0f}%/{rec['overhead_pct']:.0f}%)"
         )
         if log_mlflow:
             mlflow.log_metrics(

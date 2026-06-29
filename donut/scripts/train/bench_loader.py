@@ -10,6 +10,9 @@ Mirrors the other bench CLIs (bench_train, bench_speed): same defaults from
 constants, same GLOBAL_OUT_DIR out path, same per-combo JSON records + table.
 The per-combo timer is inline here (no donut.bench twin) — the loop is trivial.
 
+The DataLoader is built to match train.py's (pin_memory + seeded workers), so the
+number reflects what training actually sees, not a different loader.
+
 Metric (see README.md Metrics): loader docs/s = batch_size / mean_batch_Δt.
   Δt = wall time the DataLoader takes to produce one ready batch (decode +
   processor resize, parallelised across num_workers).
@@ -17,6 +20,7 @@ Metric (see README.md Metrics): loader docs/s = batch_size / mean_batch_Δt.
 
 import itertools
 import json
+import random
 import time
 from pathlib import Path
 
@@ -42,6 +46,12 @@ def _filename(num_workers: int, h: int, w: int, batch_size: int) -> str:
     return f"nw{num_workers}__{h}x{w}__bs{batch_size}.json"
 
 
+def _seed_worker(worker_id: int) -> None:
+    """Seed each DataLoader worker reproducibly (matches train.py)."""
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
+
+
 def bench_loader_step(
     processor: DonutProcessor,
     samples: list[dict],
@@ -51,11 +61,15 @@ def bench_loader_step(
     batch_size: int,
     num_workers: int,
     max_length: int,
+    pin_memory: bool,
     n_runs: int,
     n_warmup: int,
     seed: int,
 ) -> dict:
-    """Time the mean wall clock to produce one ready batch from real data."""
+    """Time the mean wall clock to produce one ready batch from real data.
+
+    The loader mirrors train.py's: shuffle + seeded generator/workers + pin_memory.
+    """
     set_processor_image_size(processor, h, w)
     ds = DonutDataset(samples, processor, max_length=max_length)
     generator = torch.Generator().manual_seed(seed)
@@ -64,7 +78,9 @@ def bench_loader_step(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         generator=generator,
+        worker_init_fn=_seed_worker,
     )
 
     times_ms: list[float] = []
@@ -116,8 +132,10 @@ def main(
     batch_sizes: str = "1",
     num_workers: str = "0,4",
     max_length: int = DEFAULT_MAX_LENGTH,
-    n_runs: int = 10,
-    n_warmup: int = 3,
+    # Matches train.py (pinned on cuda); the pinning copy is a real per-batch cost.
+    pin_memory: bool = True,
+    n_runs: int = 50,
+    n_warmup: int = 10,
     force: bool = False,
 ) -> None:
     """Per-(workers × size × batch) dataloader throughput on real data."""
@@ -151,6 +169,7 @@ def main(
             batch_size=bs,
             num_workers=nw,
             max_length=max_length,
+            pin_memory=pin_memory,
             n_runs=n_runs,
             n_warmup=n_warmup,
             seed=seed,

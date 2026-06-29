@@ -3,7 +3,7 @@
 No real images or dataset downloads required. All functions return dicts
 suitable for JSON serialization or pandas. The two atomic units are
 bench_infer_step (one generate() call) and bench_train_step (one fwd+bwd+opt
-step); both report the same harmonized docs/s metrics (see METRICS.md). The grid
+step); both report the same harmonized docs/s metrics (see README.md Metrics). The grid
 sweep / per-backend loop over them lives in scripts/.
 """
 
@@ -92,7 +92,7 @@ def bench_infer_step(
 ) -> dict:
     """Benchmark one inference step (encoder forward + autoregressive decode).
 
-    Harmonized speed metric (see METRICS.md): docs/s = batch_size / Δt, where one
+    Harmonized speed metric (see README.md Metrics): docs/s = batch_size / Δt, where one
     doc = one image + its generated token sequence. compute_docs_s and
     encoder_docs_s mean exactly what they mean in the training bench -- the only
     difference is that here the "step" is a generate() call, not fwd+bwd+opt.
@@ -173,12 +173,16 @@ def bench_train_step(
     batch_size: int,
     max_length: int,
     precision: str = "bf16",
+    grad_clip: float = 1.0,
     n_warmup: int = 3,
     n_runs: int = 10,
     seed: int = 42,
 ) -> dict:
     """Benchmark one training step for one (backend, size, batch, max_length) combo.
-    docs/s = batch_size / Δt, doc = image + its label sequence; see METRICS.md. `
+
+    The timed step mirrors the real train.py update: forward → backward → grad-clip →
+    optimizer.step. docs/s = batch_size / Δt, doc = image + its label sequence; see
+    README.md (Metrics).
     """
     set_encoder_image_size(model, h, w)
     config = {
@@ -187,6 +191,7 @@ def bench_train_step(
         "image_width": w,
         "batch_size": batch_size,
         "max_length": max_length,
+        "grad_clip": grad_clip,
     }
     try:
         init_shift_tokens_from_decoder(model)
@@ -224,6 +229,7 @@ def bench_train_step(
             with autocast(device, precision):
                 loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
         enc = time_fn(encoder_fwd, n_warmup, n_runs, verbose=False)

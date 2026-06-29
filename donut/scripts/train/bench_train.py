@@ -7,10 +7,11 @@ take per backend, and in which component does the time go? Mirrors the inference
 same harmonized docs/s metric. The atomic per-combo timer is donut.bench.
 bench_train_step (twin of bench_infer_step); this CLI just sweeps it and tabulates.
 
-Metrics (see METRICS.md): docs/s = batch_size / Δt.
-  compute docs/s   — Δt = one full fwd+bwd+opt step (no data loading), GPU-synced.
+Metrics (see README.md Metrics): docs/s = batch_size / Δt.
+  compute docs/s   — Δt = one full fwd+bwd+clip+opt step (no data loading), GPU-synced;
+                     same op set as train.py's compute window.
   encoder docs/s   — Δt = encoder forward only (isolates the Swin SDPA patch).
-Component ms/step: encoder_fwd, decoder_fwd, backward, optim_step.
+Component ms/step: encoder_fwd, decoder_fwd, backward, optim_step (clip + step).
 """
 
 import itertools
@@ -54,6 +55,8 @@ def main(
     image_sizes: str = DEFAULT_IMAGE_SIZE_STR,
     batch_sizes: str = "1",
     max_length: int = DEFAULT_MAX_LENGTH,
+    # Matches train.py's default; clipped inside the timed step for window parity.
+    grad_clip: float = 1.0,
     n_runs: int = 10,
     n_warmup: int = 3,
     force: bool = False,
@@ -90,6 +93,7 @@ def main(
             batch_size=bs,
             max_length=max_length,
             precision=precision,
+            grad_clip=grad_clip,
             n_warmup=n_warmup,
             n_runs=n_runs,
             seed=seed,

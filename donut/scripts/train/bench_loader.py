@@ -10,7 +10,7 @@ Mirrors the other bench CLIs (bench_train, bench_speed): same defaults from
 constants, same GLOBAL_OUT_DIR out path, same per-combo JSON records + table.
 The per-combo timer is inline here (no donut.bench twin) — the loop is trivial.
 
-Metric (see METRICS.md): loader docs/s = batch_size / mean_batch_Δt.
+Metric (see README.md Metrics): loader docs/s = batch_size / mean_batch_Δt.
   Δt = wall time the DataLoader takes to produce one ready batch (decode +
   processor resize, parallelised across num_workers).
 """

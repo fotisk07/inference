@@ -144,11 +144,11 @@ def evaluate(
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
         _sync(device)
-        c0 = time.time()
+        c0 = time.perf_counter()
         with autocast(device, precision):
             loss = model(pixel_values=pixel_values, labels=labels).loss
         _sync(device)
-        compute += time.time() - c0
+        compute += time.perf_counter() - c0
         total_loss += loss.item()
         docs += pixel_values.shape[0]
     docs_s = docs / compute if compute > 0 else None
@@ -157,7 +157,7 @@ def evaluate(
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 def docs_per_s(n: int, secs: float) -> float | None:
-    """The one throughput formula (see METRICS.md): docs/s = n / Δt."""
+    """The one throughput formula (see README.md Metrics): docs/s = n / Δt."""
     return n / secs if secs > 0 else None
 
 
@@ -172,14 +172,14 @@ class EpochStats:
 
     The wall clock splits three ways (all over `wall`, summing to 100%):
       data%     — waiting on the DataLoader (`data_fetch`)
-      compute%  — synced H2D+fwd+bwd+opt (`compute`)
-      overhead% — everything else: per-step .item()/postfix/mlflow/sync
+      compute%  — synced fwd+bwd+clip+opt (`compute`); same op set as bench_train_step
+      overhead% — everything else: H2D + scheduler.step + .item()/postfix/mlflow/sync
     `compute% == e2e_docs_s / compute_docs_s`, so the e2e↔compute gap is exactly
     `data% + overhead%` — not the dataloader alone.
     """
 
     data_fetch: float = 0.0  # wall waiting on the loader
-    compute: float = 0.0  # synced H2D+fwd+bwd+opt
+    compute: float = 0.0  # synced fwd+bwd+clip+opt (no H2D, no scheduler)
     wall: float = 0.0  # full epoch wall clock
     docs: int = 0
     steps: int = 0
@@ -210,7 +210,7 @@ class EpochStats:
 
 
 def _print_epoch_table(records: list[dict]) -> None:
-    """Pretty per-epoch summary: loss + every docs/s window (see METRICS.md)."""
+    """Pretty per-epoch summary: loss + every docs/s window (see README.md Metrics)."""
     table = PrettyTable()
     table.field_names = [
         "epoch",
@@ -358,32 +358,35 @@ def train(config: Config) -> None:
     for epoch in range(config.max_epochs):
         # --- train one epoch ---
         # Per-step wall-time splits into data_fetch (waiting on the loader) and
-        # compute (H2D + fwd + bwd + opt, synced); the whole epoch is the e2e window.
-        # See METRICS.md.
+        # compute (fwd + bwd + clip + opt, synced — H2D and scheduler.step fall into
+        # overhead); the whole epoch is the e2e window. See README.md (Metrics).
         model.train()
         stats = EpochStats()
-        wall_start = time.time()
-        end = time.time()
+        wall_start = time.perf_counter()
+        end = time.perf_counter()
 
         bar = tqdm(
             train_loader, desc=f"epoch {epoch + 1}/{config.max_epochs}", leave=False
         )
         for batch in bar:
-            stats.data_fetch += time.time() - end
+            stats.data_fetch += time.perf_counter() - end
 
-            c0 = time.time()
+            # H2D is data movement, not compute → outside the window (lands in overhead),
+            # so compute_docs_s matches bench_train_step (tensors already on device there).
             pixel_values = batch["pixel_values"].to(config.device)
             labels = batch["labels"].to(config.device)
+
+            c0 = time.perf_counter()
             with autocast(config.device, config.precision):
                 loss = model(pixel_values=pixel_values, labels=labels).loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
             _sync(config.device)
-            stats.compute += time.time() - c0
+            stats.compute += time.perf_counter() - c0
 
+            scheduler.step()  # CPU LR math → outside the compute window (negligible)
             stats.loss_sum += loss.item()
             stats.docs += pixel_values.shape[0]
             stats.steps += 1
@@ -391,9 +394,9 @@ def train(config: Config) -> None:
             bar.set_postfix(loss=f"{loss.item():.4f}")
             if log_mlflow:
                 mlflow.log_metric("train_loss_step", loss.item(), step=global_step)
-            end = time.time()
+            end = time.perf_counter()
 
-        stats.wall = time.time() - wall_start
+        stats.wall = time.perf_counter() - wall_start
 
         # --- validation ---
         val_loss, val_docs_s = evaluate(

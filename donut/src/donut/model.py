@@ -49,6 +49,27 @@ def autocast(device: str, precision: str):
     )
 
 
+def compile_model(model, *, enabled: bool = False):
+    """torch.compile the model for training fwd+bwd fusion (SKELETON).
+
+    Training is compute-bound (large query_len), so the win here is kernel fusion
+    in the forward/backward, NOT the launch-gap removal that helps q=1 decode.
+    No-op unless enabled, so train.py / bench_train behaviour is unchanged until
+    this is fleshed out. Returns the (maybe wrapped) model.
+
+    See research/compile-training.md for the plan and risk list.
+    """
+    if not enabled:
+        return model
+    # TODO: return torch.compile(model, mode="default")  # then try "max-autotune"
+    #   - measure with bench_train_step's component breakdown (fwd/bwd/optim ms).
+    #   - graph breaks under autocast + clip_grad_norm_ silently kill the win; use
+    #     TORCH_LOGS=graph_breaks / fullgraph=True to surface them, then relax.
+    #   - first-step compile latency must stay out of steady-state timing (the
+    #     bench's n_warmup discards it; train.py should log it separately).
+    return model
+
+
 # ── Config pokes ──────────────────────────────────────────────────────────────
 # Small named wrappers around the handful of HF config mutations needed to make
 # Donut do field extraction. Each is a one-liner; the point is that the call site

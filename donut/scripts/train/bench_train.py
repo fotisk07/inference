@@ -70,6 +70,11 @@ def main(
     # fp32 master weights (no accel); each backend is applied/reverted per combo.
     # bf16 compute is applied at the forward via autocast, controlled by --precision.
     model, model_id = load_baseline_model(model_id, device, torch.float32, tiny=tiny)
+    # RESEARCH HOOK (research/compile-training): wrap here once compile_model is
+    # fleshed out, then add a --compile flag and a "compiled" column to compare the
+    # fwd/bwd/optim breakdown against the eager baseline.
+    #   from donut.model import compile_model
+    #   model = compile_model(model, enabled=compile)
     meta = run_meta(device, "f32", model_id)
     meta["precision"] = precision
 

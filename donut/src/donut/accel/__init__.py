@@ -96,6 +96,19 @@ PRESETS: dict[str, list[Step]] = {
     "fa": [MASK_CACHE, ENCODER_SDPA, DECODER_FA],
 }
 
+# RESEARCH STUB (research/compile-static-cache): once decoder_compiled is fleshed
+# out, wire it like any other step and add a preset. Layers ON TOP of an attention
+# backend — compile/static-cache is orthogonal to which SDPA kernel runs. Left
+# commented so the bench sweep is unaffected until the stub actually compiles.
+#
+# from donut.accel.decoder_compiled import (
+#     apply_decoder_compiled, revert_decoder_compiled, check_decoder_compiled,
+# )
+# DECODER_COMPILED: Step = (
+#     apply_decoder_compiled, revert_decoder_compiled, check_decoder_compiled,
+# )
+# PRESETS["sdpa_compiled"] = [MASK_CACHE, ENCODER_SDPA, DECODER_SDPA, DECODER_COMPILED]
+
 _ALIASES = {"fa2": "fa"}
 
 

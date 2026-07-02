@@ -190,9 +190,12 @@ def _register_finite_hooks(model, state: dict):
 
         return hook
 
+    # Leaf modules only: they return plain Tensors, so the backward hook fires
+    # cleanly (container ModelOutputs trip the "output should be a Tensor" warning
+    # and are never the true origin anyway — the offending Linear/attn is a leaf).
     handles = []
     for name, mod in model.named_modules():
-        if name:
+        if name and not list(mod.children()):
             handles.append(mod.register_forward_hook(fwd_hook(name)))
             handles.append(mod.register_full_backward_hook(bwd_hook(name)))
     return handles
@@ -338,7 +341,11 @@ def phase_bisect(model_name, data_json, device, height, width, batch_size, n_sam
     # 1) decoder kernel sweep (encoder held at SDPA) -- isolates the culprit kernel
     print("\n  [1] decoder kernel sweep (bf16, encoder=SDPA):")
     t = PrettyTable(["decoder backend", "first NaN step", "verdict"])
-    decoders = ["sdpa", "sdpa_math", "sdpa_efficient", "sdpa_flash", "fa"]
+    # sdpa_cudnn is the tell: plain "sdpa" lets PyTorch auto-pick, and cuDNN is
+    # highest-priority in recent builds. If auto("sdpa") NaNs but every FORCED
+    # single kernel is clean, cuDNN is what auto picked -> its bf16 backward at
+    # large kv_len is the bug.
+    decoders = ["sdpa", "sdpa_cudnn", "sdpa_math", "sdpa_efficient", "sdpa_flash", "fa"]
     for be in decoders:
         if be == "fa" and not fa_available():
             t.add_row([be, "-", "skipped (no flash-attn)"])
@@ -445,7 +452,15 @@ def _wrap_decoder_fp32(model):
     encoder stays bf16."""
     orig = model.decoder.forward
 
+    def up(x):
+        # Encoder ran under autocast -> encoder_hidden_states arrive as bf16. With
+        # autocast disabled the decoder's fp32 weights would mismatch them in
+        # F.linear, so upcast every float tensor arg to fp32 first.
+        return x.float() if torch.is_tensor(x) and x.is_floating_point() else x
+
     def fwd(*a, **k):
+        a = tuple(up(x) for x in a)
+        k = {kk: up(v) for kk, v in k.items()}
         with torch.autocast(device_type="cuda", enabled=False):
             return orig(*a, **k)
 
@@ -494,7 +509,10 @@ def phase_fixes(model_name, data_json, device, height, width, batch_size, n_samp
     rows.append(
         ("fix2: whole decoder fp32", *fresh("sdpa", "bf16", _wrap_decoder_fp32))
     )
-    rows.append(("fix3: decoder sdpa_math", *fresh("sdpa_math", "bf16")))
+    # fix3: exclude cuDNN — the real fix. Full bf16 speed, no precision change.
+    rows.append(("fix3: decoder sdpa_efficient", *fresh("sdpa_efficient", "bf16")))
+    rows.append(("fix3b: decoder sdpa_flash", *fresh("sdpa_flash", "bf16")))
+    rows.append(("fix3c: decoder sdpa_math", *fresh("sdpa_math", "bf16")))
     if fa_available():
         rows.append(("fix4: decoder fa", *fresh("fa", "bf16")))
     rows.append(("fix5: skip-NaN + clip guard", *fresh("sdpa", "bf16", skip_nan=True)))
@@ -512,10 +530,13 @@ def phase_fixes(model_name, data_json, device, height, width, batch_size, n_samp
         )
     print(t)
 
+    # Exclude the two baselines AND the skip-NaN guard: skip-NaN reports "clean"
+    # only because it drops every big-image step (grad is NaN -> optimizer.step
+    # skipped), so it never actually learns from them — not a real fix.
     clean = [
         (n, ms)
         for n, nan, ms in rows
-        if nan is None and "safe" not in n and "current" not in n
+        if nan is None and not any(w in n for w in ("safe", "current", "skip-NaN"))
     ]
     if clean:
         best = min(clean, key=lambda r: r[1])
